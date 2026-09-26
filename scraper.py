@@ -1,11 +1,12 @@
 import os
 import sys
 import time
+import traceback
 from datetime import datetime, timedelta
 
 import pandas as pd
 from sqlalchemy import create_engine
-from vnstock import Vnstock
+from vnstock import Vnstock, __version__ as VNSTOCK_VERSION
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 WATCH_LIST = ["HPG", "POW", "PC1", "PLX"]
@@ -22,10 +23,10 @@ def get_stock_data(ticker: str) -> pd.DataFrame:
         df = stock.quote.history(
             start=start_date.strftime("%Y-%m-%d"),
             end=end_date.strftime("%Y-%m-%d"),
-            interval="1D",
         )
     except Exception as e:
-        print(f"-> Lỗi khi gọi vnstock cho {ticker}: {e}")
+        print(f"-> LỖI THẬT SỰ khi lấy {ticker}: [{type(e).__name__}] {e}")
+        traceback.print_exc()
         return pd.DataFrame()
 
     if df is None or df.empty:
@@ -61,6 +62,8 @@ def load_to_database(df: pd.DataFrame) -> bool:
 
 
 def main():
+    print(f"[debug] vnstock version: {VNSTOCK_VERSION}")
+
     if not DATABASE_URL:
         print("LỖI: Chưa cấu hình DATABASE_URL.")
         sys.exit(1)
@@ -81,3 +84,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
