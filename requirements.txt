@@ -3,4 +3,4 @@ pandas==2.1.1
 requests==2.31.0
 SQLAlchemy==2.0.21
 psycopg2-binary==2.9.9
-vnstock==3.3.0
+vnstock>=4.0.2,<5.0.0
