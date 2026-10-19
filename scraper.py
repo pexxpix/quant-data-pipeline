@@ -149,6 +149,19 @@ def make_engine(database_url):
     return create_engine(url, connect_args={"connect_timeout": 30}, pool_pre_ping=True)
 
 
+def describe_connection(engine):
+    """In ra role/database đang kết nối (KHÔNG in mật khẩu) để dễ chẩn đoán lỗi quyền."""
+    print(f"Kết nối tới: {engine.url.render_as_string(hide_password=True)}")
+    with engine.connect() as conn:
+        role, db, can_create = conn.execute(
+            text(
+                "SELECT current_user, current_database(), "
+                "has_schema_privilege(current_user, 'public', 'CREATE')"
+            )
+        ).one()
+    print(f"Role: {role} | Database: {db} | Có quyền CREATE trong schema public: {can_create}")
+
+
 def load_to_database(df, snapshot_date, engine):
     """Ghi 1 snapshot. Chạy lại cùng ngày sẽ thay snapshot cũ thay vì nhân đôi dòng."""
     with engine.begin() as conn:
@@ -188,7 +201,9 @@ def main():
     all_data = pd.concat(frames, ignore_index=True)
     print("Đang kết nối Database...")
     try:
-        load_to_database(all_data, snapshot_date, make_engine(database_url))
+        engine = make_engine(database_url)
+        describe_connection(engine)
+        load_to_database(all_data, snapshot_date, engine)
     except Exception as e:  # noqa: BLE001
         print(f"LỖI khi lưu vào Database: {type(e).__name__}: {e}")
         sys.exit(1)
