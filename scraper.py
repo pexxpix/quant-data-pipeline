@@ -9,8 +9,11 @@ import requests
 from sqlalchemy import create_engine, inspect, text
 
 TABLE = "daily_prices"
-WATCH_LIST = ["POW", "TCH", "HDB", "EIB", "TCX", "GMD"]
-LOOKBACK_DAYS = 365
+WATCH_LIST = ["HPG", "POW", "PC1", "PLX","HDB", "TCH", "EIB", "TCX", "VIX", "GMD", "MSN" ]
+KEEP_SESSIONS = 90  # chỉ giữ 90 phiên giao dịch gần nhất của mỗi mã
+# 90 phiên ~ 4-5 tháng lịch; xin dư 200 ngày lịch để chắc chắn đủ cả khi có nghỉ Tết/lễ,
+# sau đó cắt lại đúng 90 phiên.
+FETCH_CALENDAR_DAYS = 200
 VN_TZ = "Asia/Ho_Chi_Minh"
 COLUMNS = ["trading_date", "open", "high", "low", "close", "volume"]
 
@@ -109,10 +112,11 @@ def fetch_from_provider(name, url, make_params, parser, ticker, start_ts, end_ts
 
 
 def get_stock_data(ticker, snapshot_date):
+    """Lấy KEEP_SESSIONS phiên gần nhất của một mã."""
     print(f"Đang kéo dữ liệu cho mã {ticker}...")
 
     end_ts = int(time.time())
-    start_ts = int((datetime.now() - timedelta(days=LOOKBACK_DAYS)).timestamp())
+    start_ts = int((datetime.now() - timedelta(days=FETCH_CALENDAR_DAYS)).timestamp())
 
     for name, url, make_params, parser in PROVIDERS:
         df = fetch_from_provider(name, url, make_params, parser, ticker, start_ts, end_ts)
@@ -121,9 +125,16 @@ def get_stock_data(ticker, snapshot_date):
 
         for col in COLUMNS[1:]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-        df = df.dropna(subset=["close"]).sort_values("trading_date").reset_index(drop=True)
+        df = (
+            df.dropna(subset=["close"])
+            .drop_duplicates("trading_date", keep="last")
+            .sort_values("trading_date")
+            .tail(KEEP_SESSIONS)  # đúng 90 phiên gần nhất
+            .reset_index(drop=True)
+        )
         if df.empty:
             continue
+        df["volume"] = df["volume"].round().astype("Int64")
 
         df["ticker"] = ticker
         df["source"] = name
@@ -162,19 +173,88 @@ def describe_connection(engine):
     print(f"Role: {role} | Database: {db} | Có quyền CREATE trong schema public: {can_create}")
 
 
-def load_to_database(df, snapshot_date, engine):
-    """Ghi 1 snapshot. Chạy lại cùng ngày sẽ thay snapshot cũ thay vì nhân đôi dòng."""
+DDL = f"""
+CREATE TABLE {TABLE} (
+    trading_date  DATE             NOT NULL,
+    open          DOUBLE PRECISION,
+    high          DOUBLE PRECISION,
+    low           DOUBLE PRECISION,
+    close         DOUBLE PRECISION,
+    volume        BIGINT,
+    ticker        TEXT             NOT NULL,
+    source        TEXT,
+    snapshot_date DATE,
+    PRIMARY KEY (ticker, trading_date)
+)
+"""
+
+
+def load_to_database(df, engine):
+    """Mỗi mã chỉ có 1 dòng cho mỗi phiên, tối đa KEEP_SESSIONS phiên gần nhất.
+
+    - Mã lấy được dữ liệu: xoá toàn bộ dòng cũ của mã đó rồi ghi bản mới
+      (giá điều chỉnh luôn nhất quán, chạy lại bao nhiêu lần cũng không nhân đôi).
+    - Mã lấy lỗi hôm nay: giữ nguyên dữ liệu cũ, chỉ cắt cho còn tối đa 90 phiên.
+    - Mã không còn trong WATCH_LIST: bị xoá khỏi bảng (thêm lại thì lần chạy sau
+      sẽ tải lại đủ 90 phiên, nên không mất gì).
+    """
+    tickers = sorted(df["ticker"].unique())
     with engine.begin() as conn:
-        if inspect(conn).has_table(TABLE):
-            res = conn.execute(
-                text(f"DELETE FROM {TABLE} WHERE snapshot_date = :d"), {"d": snapshot_date}
-            )
-            print(f"Đã xoá {res.rowcount} dòng cũ của snapshot {snapshot_date} (nếu có).")
+        if not inspect(conn).has_table(TABLE):
+            conn.execute(text(DDL))
+            print(f"Đã tạo bảng {TABLE}.")
+
+        replaced = 0
+        for t in tickers:
+            replaced += conn.execute(
+                text(f"DELETE FROM {TABLE} WHERE ticker = :t"), {"t": t}
+            ).rowcount
         df.to_sql(TABLE, conn, if_exists="append", index=False, method="multi", chunksize=500)
-        count = conn.execute(
-            text(f"SELECT COUNT(*) FROM {TABLE} WHERE snapshot_date = :d"), {"d": snapshot_date}
-        ).scalar()
-    print(f"Đã lưu thành công! Bảng {TABLE} hiện có {count} dòng cho snapshot {snapshot_date}.")
+
+        removed, trimmed = 0, 0
+        existing = [r[0] for r in conn.execute(text(f"SELECT DISTINCT ticker FROM {TABLE}"))]
+        for t in existing:
+            if t not in WATCH_LIST:
+                removed += conn.execute(
+                    text(f"DELETE FROM {TABLE} WHERE ticker = :t"), {"t": t}
+                ).rowcount
+                continue
+            # bảng kiểu cũ có thể còn nhiều bản sao (nhiều snapshot): chỉ giữ bản mới nhất
+            trimmed += conn.execute(
+                text(
+                    f"DELETE FROM {TABLE} WHERE ticker = :t AND snapshot_date < "
+                    f"(SELECT MAX(snapshot_date) FROM {TABLE} WHERE ticker = :t)"
+                ),
+                {"t": t},
+            ).rowcount
+            # ngày của phiên thứ 90 tính từ phiên mới nhất; xoá mọi phiên cũ hơn nó
+            oldest_kept = conn.execute(
+                text(
+                    f"SELECT DISTINCT trading_date FROM {TABLE} WHERE ticker = :t "
+                    f"ORDER BY trading_date DESC LIMIT 1 OFFSET :k"
+                ),
+                {"t": t, "k": KEEP_SESSIONS - 1},
+            ).scalar()
+            if oldest_kept is not None:
+                trimmed += conn.execute(
+                    text(f"DELETE FROM {TABLE} WHERE ticker = :t AND trading_date < :d"),
+                    {"t": t, "d": oldest_kept},
+                ).rowcount
+
+        summary = conn.execute(
+            text(
+                f"SELECT ticker, COUNT(*), MIN(trading_date), MAX(trading_date) "
+                f"FROM {TABLE} GROUP BY ticker ORDER BY ticker"
+            )
+        ).fetchall()
+
+    print(
+        f"Đã thay {replaced} dòng cũ bằng {len(df)} dòng mới; cắt {trimmed} dòng thừa "
+        f"(trùng hoặc quá {KEEP_SESSIONS} phiên); xoá {removed} dòng của mã không còn trong WATCH_LIST."
+    )
+    print(f"Đã lưu thành công! Bảng {TABLE} hiện có:")
+    for ticker, count, first, last in summary:
+        print(f"   {ticker:<6} {count:>4} phiên, từ {first} đến {last}")
 
 
 def main():
@@ -183,7 +263,8 @@ def main():
         print("LỖI: Chưa cấu hình DATABASE_URL.")
         sys.exit(1)
 
-    snapshot_date = datetime.now(ZoneInfo(VN_TZ)).date()
+    snapshot_date = datetime.now(ZoneInfo(VN_TZ)).date()  # ngày lấy dữ liệu
+    print(f"Giữ {KEEP_SESSIONS} phiên gần nhất cho mỗi mã: {', '.join(WATCH_LIST)}")
 
     frames, failed = [], []
     for ticker in WATCH_LIST:
@@ -203,7 +284,7 @@ def main():
     try:
         engine = make_engine(database_url)
         describe_connection(engine)
-        load_to_database(all_data, snapshot_date, engine)
+        load_to_database(all_data, engine)
     except Exception as e:  # noqa: BLE001
         print(f"LỖI khi lưu vào Database: {type(e).__name__}: {e}")
         sys.exit(1)
