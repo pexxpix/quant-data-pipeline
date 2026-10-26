@@ -9,7 +9,7 @@ import requests
 from sqlalchemy import create_engine, inspect, text
 
 TABLE = "daily_prices"
-WATCH_LIST = ["HPG", "POW", "PC1", "PLX"]
+WATCH_LIST = ["POW", "TCH", "HDB", "EIB", "TCX", "GMD"]
 LOOKBACK_DAYS = 365
 VN_TZ = "Asia/Ho_Chi_Minh"
 COLUMNS = ["trading_date", "open", "high", "low", "close", "volume"]
