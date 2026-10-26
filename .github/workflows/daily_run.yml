@@ -29,3 +29,10 @@ jobs:
       env:
         DATABASE_URL: ${{ secrets.DATABASE_URL }}
       run: python scraper.py
+
+    - name: Tính chỉ báo RSI, MFI, CMF
+      # Vẫn chạy khi bước cào lỗi một vài mã, để các mã còn lại có chỉ báo mới
+      if: ${{ !cancelled() }}
+      env:
+        DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      run: python indicators.py
