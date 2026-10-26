@@ -10,6 +10,15 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
 
+    # Quyền cần để đăng trang biểu đồ lên GitHub Pages
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
     - name: Lấy code về máy chủ ảo
       uses: actions/checkout@v4
@@ -36,3 +45,21 @@ jobs:
       env:
         DATABASE_URL: ${{ secrets.DATABASE_URL }}
       run: python indicators.py
+
+    - name: Vẽ biểu đồ
+      id: charts
+      if: ${{ !cancelled() }}
+      env:
+        DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      run: python charts.py
+
+    - name: Chuẩn bị trang biểu đồ
+      if: ${{ !cancelled() && steps.charts.outcome == 'success' }}
+      uses: actions/upload-pages-artifact@v4
+      with:
+        path: site
+
+    - name: Đăng lên GitHub Pages
+      id: deployment
+      if: ${{ !cancelled() && steps.charts.outcome == 'success' }}
+      uses: actions/deploy-pages@v4
