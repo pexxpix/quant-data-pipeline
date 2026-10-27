@@ -1,4 +1,4 @@
-"""Tính RSI, MFI, CMF cho mọi mã trong bảng daily_prices và lưu vào bảng indicators.
+"""Tính RSI, MFI, CMF, ADX/+DI/-DI cho mọi mã trong bảng daily_prices và lưu vào bảng indicators.
 
 Chạy sau scraper.py. Mỗi lần chạy tính lại toàn bộ từ dữ liệu mới nhất,
 nên chạy bao nhiêu lần cũng cho cùng kết quả (không nhân đôi dòng).
@@ -26,6 +26,10 @@ MFI_OVERSOLD = 20
 CMF_PERIOD = 20          # số phiên cộng dồn dòng tiền
 CMF_THRESHOLD = 0.05     # |CMF| nhỏ hơn mức này coi là trung tính (lọc nhiễu)
 
+ADX_PERIOD = 14
+ADX_TREND = 25           # ADX >= mức này: có xu hướng rõ (hướng do +DI / -DI quyết định)
+ADX_NO_TREND = 20        # ADX < mức này: thị trường đi ngang
+
 SOURCE_TABLE = "daily_prices"
 TABLE = "indicators"
 VN_TZ = "Asia/Ho_Chi_Minh"
@@ -39,14 +43,27 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     rsi_14        DOUBLE PRECISION,
     mfi_14        DOUBLE PRECISION,
     cmf_20        DOUBLE PRECISION,
+    adx_14        DOUBLE PRECISION,
+    plus_di_14    DOUBLE PRECISION,
+    minus_di_14   DOUBLE PRECISION,
     rsi_zone      TEXT,
     mfi_zone      TEXT,
     cmf_signal    TEXT,
+    adx_signal    TEXT,
     snapshot_date DATE,
     computed_at   TIMESTAMP,
     PRIMARY KEY (ticker, trading_date)
 )
 """
+
+# Bảng indicators tạo từ phiên bản trước chưa có cột ADX: thêm vào nếu thiếu
+# (chạy nhiều lần không sao, cột đã có thì Postgres bỏ qua).
+MIGRATIONS = [
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS adx_14 DOUBLE PRECISION",
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS plus_di_14 DOUBLE PRECISION",
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS minus_di_14 DOUBLE PRECISION",
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS adx_signal TEXT",
+]
 
 # Chỉ lấy snapshot mới nhất của mỗi mã: snapshot đó đã chứa đủ ~1 năm giá,
 # và toàn bộ chuỗi được lấy cùng một lúc nên giá điều chỉnh (cổ tức, chia tách)
@@ -67,14 +84,19 @@ JOIN (
 # ---------------------------------------------------------------------------
 def wilder_average(values: pd.Series, period: int) -> pd.Series:
     """Trung bình làm mượt kiểu Wilder: giá trị đầu là trung bình cộng của
-    `period` giá trị đầu tiên, sau đó mỗi phiên mới: avg = (avg_trước*(n-1) + x)/n.
+    `period` giá trị hợp lệ đầu tiên, sau đó mỗi phiên mới: avg = (avg_trước*(n-1) + x)/n.
     Cách này cho kết quả khớp với TradingView, FireAnt, StockCharts..."""
     result = pd.Series(np.nan, index=values.index)
-    if len(values) <= period:
+    valid = np.flatnonzero(values.notna().to_numpy())
+    if len(valid) == 0:
+        return result
+    start = valid[0]                 # bỏ qua các phiên đầu chưa có giá trị (vd: phiên đầu của diff)
+    seed_pos = start + period - 1    # phiên có đủ `period` giá trị để lấy trung bình đầu tiên
+    if seed_pos >= len(values):
         return result
     seeded = values.copy()
-    seeded.iloc[: period + 1] = np.nan
-    seeded.iloc[period] = values.iloc[1 : period + 1].mean()
+    seeded.iloc[: seed_pos + 1] = np.nan
+    seeded.iloc[seed_pos] = values.iloc[start : seed_pos + 1].mean()
     return seeded.ewm(alpha=1 / period, adjust=False).mean()
 
 
@@ -112,6 +134,41 @@ def cmf(df: pd.DataFrame, period: int = CMF_PERIOD) -> pd.Series:
     return flow_volume.rolling(period).sum() / df["volume"].rolling(period).sum().replace(0, np.nan)
 
 
+def adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
+    """ADX / +DI / -DI của Wilder. Thang 0-100.
+
+    +DI: sức mạnh phía tăng (đỉnh hôm nay vượt đỉnh hôm qua bao nhiêu).
+    -DI: sức mạnh phía giảm (đáy hôm nay thủng đáy hôm qua bao nhiêu).
+    ADX: độ mạnh của xu hướng, KHÔNG cho biết hướng - phải đọc kèm +DI / -DI.
+    Giá trị ADX đầu tiên có ở phiên thứ 2*period (làm mượt 2 lần)."""
+    high, low, close = df["high"], df["low"], df["close"]
+    prev_close = close.shift(1)
+
+    # Biên độ thực: lấy cả khoảng trống giá so với phiên trước (gap)
+    true_range = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1, skipna=False)
+
+    up_move = high.diff()        # đỉnh nâng lên bao nhiêu
+    down_move = -low.diff()      # đáy hạ xuống bao nhiêu
+    # Mỗi phiên chỉ tính một phía: phía nào lớn hơn (và dương) mới được ghi nhận
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0).where(up_move.notna())
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0).where(down_move.notna())
+
+    atr = wilder_average(true_range, period)
+    atr_safe = atr.replace(0, np.nan)
+    plus_di = (100 * wilder_average(plus_dm, period) / atr_safe).where(atr != 0, 0.0).where(atr.notna())
+    minus_di = (100 * wilder_average(minus_dm, period) / atr_safe).where(atr != 0, 0.0).where(atr.notna())
+
+    di_sum = plus_di + minus_di
+    dx = (100 * (plus_di - minus_di).abs() / di_sum.replace(0, np.nan)).where(di_sum != 0, 0.0)
+    dx = dx.where(di_sum.notna())
+    return pd.DataFrame(
+        {"adx": wilder_average(dx, period), "plus_di": plus_di, "minus_di": minus_di},
+        index=df.index,
+    )
+
+
 def zone(value, low, high):
     if pd.isna(value):
         return None
@@ -132,6 +189,16 @@ def cmf_label(value):
     return "trung tính"
 
 
+def adx_label(adx_value, plus_di, minus_di):
+    if pd.isna(adx_value):
+        return None
+    if adx_value >= ADX_TREND:
+        return "xu hướng tăng" if plus_di >= minus_di else "xu hướng giảm"
+    if adx_value >= ADX_NO_TREND:
+        return "xu hướng yếu"
+    return "đi ngang"
+
+
 def compute(prices: pd.DataFrame) -> pd.DataFrame:
     prices = prices.copy()
     prices["trading_date"] = pd.to_datetime(prices["trading_date"]).dt.date
@@ -149,20 +216,28 @@ def compute(prices: pd.DataFrame) -> pd.DataFrame:
         df["rsi_14"] = rsi(df["close"])
         df["mfi_14"] = mfi(df)
         df["cmf_20"] = cmf(df)
+        dmi = adx(df)
+        df["adx_14"] = dmi["adx"]
+        df["plus_di_14"] = dmi["plus_di"]
+        df["minus_di_14"] = dmi["minus_di"]
         frames.append(df)
 
     out = pd.concat(frames, ignore_index=True)
     out["rsi_zone"] = out["rsi_14"].apply(zone, args=(RSI_OVERSOLD, RSI_OVERBOUGHT))
     out["mfi_zone"] = out["mfi_14"].apply(zone, args=(MFI_OVERSOLD, MFI_OVERBOUGHT))
     out["cmf_signal"] = out["cmf_20"].apply(cmf_label)
+    out["adx_signal"] = [
+        adx_label(a, p, m) for a, p, m in zip(out["adx_14"], out["plus_di_14"], out["minus_di_14"])
+    ]
     out["snapshot_date"] = pd.to_datetime(out["snapshot_date"]).dt.date
     out["computed_at"] = datetime.now(ZoneInfo(VN_TZ)).replace(tzinfo=None)
-    for col in ["rsi_14", "mfi_14"]:
+    for col in ["rsi_14", "mfi_14", "adx_14", "plus_di_14", "minus_di_14"]:
         out[col] = out[col].round(2)
     out["cmf_20"] = out["cmf_20"].round(4)
     return out[
         ["ticker", "trading_date", "close", "volume", "rsi_14", "mfi_14", "cmf_20",
-         "rsi_zone", "mfi_zone", "cmf_signal", "snapshot_date", "computed_at"]
+         "adx_14", "plus_di_14", "minus_di_14",
+         "rsi_zone", "mfi_zone", "cmf_signal", "adx_signal", "snapshot_date", "computed_at"]
     ]
 
 
@@ -187,6 +262,8 @@ def run(engine) -> pd.DataFrame:
 
     with engine.begin() as conn:
         conn.execute(text(DDL))
+        for stmt in MIGRATIONS:
+            conn.execute(text(stmt))
         conn.execute(text(f"DELETE FROM {TABLE}"))  # tính lại toàn bộ mỗi lần
         result.to_sql(TABLE, conn, if_exists="append", index=False, method="multi", chunksize=500)
 
@@ -198,13 +275,14 @@ def run(engine) -> pd.DataFrame:
 def print_summary(result: pd.DataFrame):
     latest = result.sort_values("trading_date").groupby("ticker").tail(1)
     print("TỔNG QUAN PHIÊN GẦN NHẤT")
-    print(f"{'Mã':<6}{'Ngày':<12}{'Giá':>9}{'RSI':>8}  {'':<11}{'MFI':>7}  {'':<11}{'CMF':>8}  ")
+    print(f"{'Mã':<6}{'Ngày':<12}{'Giá':>9}{'RSI':>8}  {'':<11}{'MFI':>7}  {'':<11}{'CMF':>8}  {'':<14}{'ADX':>6}  ")
     for _, r in latest.sort_values("ticker").iterrows():
         print(
             f"{r['ticker']:<6}{str(r['trading_date']):<12}{r['close']:>9.2f}"
             f"{r['rsi_14']:>8.1f}  {str(r['rsi_zone']):<11}"
             f"{r['mfi_14']:>7.1f}  {str(r['mfi_zone']):<11}"
-            f"{r['cmf_20']:>8.3f}  {r['cmf_signal']}"
+            f"{r['cmf_20']:>8.3f}  {str(r['cmf_signal']):<14}"
+            f"{r['adx_14']:>6.1f}  {r['adx_signal']}"
         )
 
 
