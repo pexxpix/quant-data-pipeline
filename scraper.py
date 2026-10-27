@@ -25,10 +25,12 @@ TOP_100 = [
 # Mã theo dõi riêng (ngoài top 100). Các mã cũ HPG, POW, PLX, HDB, EIB, TCX, VIX, GMD, MSN đã nằm trong TOP_100.
 EXTRA = ["PC1", "TCH"]
 WATCH_LIST = TOP_100 + [t for t in EXTRA if t not in TOP_100]
-KEEP_SESSIONS = 90  # chỉ giữ 90 phiên giao dịch gần nhất của mỗi mã
-# 90 phiên ~ 4-5 tháng lịch; xin dư 200 ngày lịch để chắc chắn đủ cả khi có nghỉ Tết/lễ,
-# sau đó cắt lại đúng 90 phiên.
-FETCH_CALENDAR_DAYS = 200
+# 340 phiên = 250 phiên (52 tuần) để so đỉnh/đáy + 90 phiên hiển thị trên biểu đồ.
+# Nhờ có lịch sử dài, RSI/ADX trên cả 90 phiên hiển thị đều đã ổn định.
+KEEP_SESSIONS = 340
+# 340 phiên ~ 16-17 tháng lịch; xin dư 540 ngày lịch để chắc chắn đủ cả khi có nghỉ Tết/lễ,
+# sau đó cắt lại đúng KEEP_SESSIONS phiên.
+FETCH_CALENDAR_DAYS = 540
 VN_TZ = "Asia/Ho_Chi_Minh"
 COLUMNS = ["trading_date", "open", "high", "low", "close", "volume"]
 
@@ -78,14 +80,10 @@ def parse_tcbs(payload):
     return df[COLUMNS]
 
 
-# (tên nguồn, url, hàm tạo params, parser) - thử lần lượt, nguồn nào có dữ liệu thì dùng
+# (tên nguồn, url, hàm tạo params, parser) - thử lần lượt, nguồn nào có dữ liệu thì dùng.
+# VNDirect đứng đầu vì đang là nguồn chạy được; TCBS trả 404 "Service not found" từ 10/2026
+# nên để cuối cùng (chỉ dùng nếu hai nguồn trên cùng lỗi).
 PROVIDERS = [
-    (
-        "tcbs",
-        "https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term",
-        lambda t, a, b: {"ticker": t, "type": "stock", "resolution": "D", "from": a, "to": b},
-        parse_tcbs,
-    ),
     (
         "vndirect",
         "https://dchart-api.vndirect.com.vn/dchart/history",
@@ -97,6 +95,12 @@ PROVIDERS = [
         "https://iboard-api.ssi.com.vn/statistics/charts/history",
         lambda t, a, b: {"symbol": t, "resolution": "1D", "from": a, "to": b},
         parse_arrays,
+    ),
+    (
+        "tcbs",
+        "https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term",
+        lambda t, a, b: {"ticker": t, "type": "stock", "resolution": "D", "from": a, "to": b},
+        parse_tcbs,
     ),
 ]
 
@@ -144,7 +148,7 @@ def get_stock_data(ticker, snapshot_date):
             df.dropna(subset=["close"])
             .drop_duplicates("trading_date", keep="last")
             .sort_values("trading_date")
-            .tail(KEEP_SESSIONS)  # đúng 90 phiên gần nhất
+            .tail(KEEP_SESSIONS)  # đúng KEEP_SESSIONS phiên gần nhất
             .reset_index(drop=True)
         )
         if df.empty:
@@ -209,9 +213,9 @@ def load_to_database(df, engine):
 
     - Mã lấy được dữ liệu: xoá toàn bộ dòng cũ của mã đó rồi ghi bản mới
       (giá điều chỉnh luôn nhất quán, chạy lại bao nhiêu lần cũng không nhân đôi).
-    - Mã lấy lỗi hôm nay: giữ nguyên dữ liệu cũ, chỉ cắt cho còn tối đa 90 phiên.
+    - Mã lấy lỗi hôm nay: giữ nguyên dữ liệu cũ, chỉ cắt cho còn tối đa KEEP_SESSIONS phiên.
     - Mã không còn trong WATCH_LIST: bị xoá khỏi bảng (thêm lại thì lần chạy sau
-      sẽ tải lại đủ 90 phiên, nên không mất gì).
+      sẽ tải lại đủ KEEP_SESSIONS phiên, nên không mất gì).
     """
     tickers = sorted(df["ticker"].unique())
     with engine.begin() as conn:
@@ -242,7 +246,7 @@ def load_to_database(df, engine):
                 ),
                 {"t": t},
             ).rowcount
-            # ngày của phiên thứ 90 tính từ phiên mới nhất; xoá mọi phiên cũ hơn nó
+            # ngày của phiên thứ KEEP_SESSIONS tính từ phiên mới nhất; xoá mọi phiên cũ hơn nó
             oldest_kept = conn.execute(
                 text(
                     f"SELECT DISTINCT trading_date FROM {TABLE} WHERE ticker = :t "

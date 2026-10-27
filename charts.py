@@ -1,8 +1,10 @@
-"""Vẽ biểu đồ giá, RSI, MFI, CMF, ADX của từng mã từ bảng indicators.
+"""Vẽ biểu đồ giá, RSI, MFI, CMF, ADX của từng mã và độ rộng thị trường từ bảng indicators.
 
 Kết quả là một trang web duy nhất: site/index.html
+- Độ rộng thị trường: số mã lập đỉnh / đáy 52 tuần mỗi phiên
 - Bảng tổng quan phiên gần nhất (bấm vào một mã để xem biểu đồ của mã đó)
 - Ô chọn mã và biểu đồ 5 tầng: giá đóng cửa, RSI, MFI, CMF, ADX (+DI / -DI)
+Chỉ báo được tính trên toàn bộ lịch sử đã lưu, nhưng chỉ vẽ DISPLAY_SESSIONS phiên gần nhất.
 
 Chạy sau indicators.py. Trên GitHub Actions, thư mục site/ được đăng lên GitHub Pages.
 """
@@ -24,6 +26,7 @@ from indicators import (
     ADX_NO_TREND,
     ADX_TREND,
     CMF_THRESHOLD,
+    HIGH_LOW_LOOKBACK,
     MFI_OVERBOUGHT,
     MFI_OVERSOLD,
     RSI_OVERBOUGHT,
@@ -33,18 +36,22 @@ from indicators import (
 
 OUTPUT_DIR = "site"
 VN_TZ = "Asia/Ho_Chi_Minh"
-# Vì chỉ lưu 90 phiên, RSI ở khoảng 45 phiên đầu cửa sổ chưa ổn định -> vẽ nét đứt mờ
+DISPLAY_SESSIONS = 90  # số phiên gần nhất được vẽ trên biểu đồ
+
+# Số phiên lịch sử (tính từ phiên đầu tiên có dữ liệu của mã) trước khi chỉ báo ổn định.
+# Thử trên 300 chuỗi giá mô phỏng: RSI và +DI/-DI khớp với giá trị tính từ lịch sử dài
+# (sai lệch < 2 điểm, 95% trường hợp) sau ~45 phiên; ADX làm mượt hai lần nên cần ~70 phiên.
+# Với lịch sử dài (scraper giữ 340 phiên) cả 90 phiên hiển thị đều đã ổn định; nét đứt mờ
+# chỉ còn xuất hiện ở mã mới niêm yết, chưa đủ lịch sử.
 RSI_RELIABLE_AFTER = 45
-# ADX làm mượt hai lần nên cần nhiều dữ liệu hơn hẳn: thử trên 300 chuỗi giá mô phỏng,
-# ADX tính từ 90 phiên chỉ khớp (sai lệch < 2 điểm, 95% trường hợp) với ADX tính từ
-# lịch sử dài kể từ khoảng phiên 70. +DI / -DI hội tụ nhanh hơn, tương đương RSI.
 ADX_RELIABLE_AFTER = 70
 DI_RELIABLE_AFTER = 45
 
 QUERY = """
 SELECT ticker, trading_date, close, rsi_14, mfi_14, cmf_20,
        adx_14, plus_di_14, minus_di_14,
-       rsi_zone, mfi_zone, cmf_signal, adx_signal
+       rsi_zone, mfi_zone, cmf_signal, adx_signal,
+       new_high_52w, new_low_52w
 FROM indicators
 ORDER BY ticker, trading_date
 """
@@ -116,15 +123,85 @@ def build_figure(df: pd.DataFrame) -> go.Figure:
 
 
 def add_warmup_line(fig, df, col, name, color, width, reliable_after, row):
-    """Vẽ một đường chỉ báo: `reliable_after` phiên đầu cửa sổ (chưa ổn định) nét đứt mờ,
-    phần sau nét liền."""
-    split = min(reliable_after, len(df) - 1)
-    early, late = df.iloc[: split + 1], df.iloc[split:]
-    fig.add_trace(go.Scatter(x=early["trading_date"], y=early[col], name=f"{name} (chưa ổn định)",
-                             mode="lines", opacity=0.45,
-                             line=dict(color=color, width=max(width - 0.5, 1), dash="dot")), row=row, col=1)
+    """Vẽ một đường chỉ báo: các phiên mà mã chưa có đủ `reliable_after` phiên lịch sử
+    (cột `pos`, đếm từ phiên đầu tiên của mã) vẽ nét đứt mờ, phần sau nét liền."""
+    early = df[df["pos"] <= reliable_after]
+    late = df[df["pos"] >= reliable_after]
+    if early[col].notna().any():
+        fig.add_trace(go.Scatter(x=early["trading_date"], y=early[col], name=f"{name} (chưa ổn định)",
+                                 mode="lines", opacity=0.45,
+                                 line=dict(color=color, width=max(width - 0.5, 1), dash="dot")), row=row, col=1)
     fig.add_trace(go.Scatter(x=late["trading_date"], y=late[col], name=name, mode="lines",
                              line=dict(color=color, width=width)), row=row, col=1)
+
+
+def ticker_list(tickers, limit=12):
+    tickers = sorted(tickers)
+    if not tickers:
+        return "–"
+    shown = ", ".join(tickers[:limit])
+    return shown + (f" +{len(tickers) - limit} mã" if len(tickers) > limit else "")
+
+
+def breadth_table(data: pd.DataFrame) -> pd.DataFrame:
+    """Mỗi phiên: số mã lập đỉnh / đáy 52 tuần, số mã đủ dữ liệu để xét, và tên các mã."""
+    eligible = data[data["new_high_52w"].notna()]
+    if eligible.empty:
+        return pd.DataFrame()
+    is_high = eligible["new_high_52w"].fillna(False).astype(bool)
+    is_low = eligible["new_low_52w"].fillna(False).astype(bool)
+    g = eligible.groupby("trading_date")
+    out = pd.DataFrame({
+        "highs": is_high.groupby(eligible["trading_date"]).sum(),
+        "lows": is_low.groupby(eligible["trading_date"]).sum(),
+        "eligible": g.size(),
+        "high_names": eligible[is_high].groupby("trading_date")["ticker"].apply(list),
+        "low_names": eligible[is_low].groupby("trading_date")["ticker"].apply(list),
+    })
+    for col in ("high_names", "low_names"):
+        out[col] = out[col].apply(lambda v: v if isinstance(v, list) else [])
+    return out.sort_index().tail(DISPLAY_SESSIONS).reset_index()
+
+
+def build_breadth_figure(b: pd.DataFrame) -> go.Figure:
+    x = b["trading_date"]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=x, y=b["highs"], name="Lập đỉnh 52 tuần", marker_color=COLORS["up"],
+        customdata=list(zip(b["eligible"], b["high_names"].apply(ticker_list))),
+        hovertemplate="%{y} mã lập đỉnh / %{customdata[0]} mã<br>%{customdata[1]}<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=x, y=-b["lows"], name="Lập đáy 52 tuần", marker_color=COLORS["down"],
+        customdata=list(zip(b["eligible"], b["low_names"].apply(ticker_list), b["lows"])),
+        hovertemplate="%{customdata[2]} mã lập đáy / %{customdata[0]} mã<br>%{customdata[1]}<extra></extra>",
+    ))
+    fig.add_hline(y=0, line_color="#6b7280", line_width=1)
+    dates = pd.to_datetime(x)
+    weekdays = pd.bdate_range(dates.min(), dates.max())
+    holidays = [d.strftime("%Y-%m-%d") for d in weekdays.difference(dates)]
+    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"]), dict(values=holidays)])
+    peak = max(5, int(b["highs"].max()), int(b["lows"].max()))
+    fig.update_yaxes(range=[-peak * 1.15, peak * 1.15], tickformat="d",
+                     title=dict(text="đáy  ←  số mã  →  đỉnh", font=dict(size=11)))
+    fig.update_layout(
+        height=280, barmode="relative", showlegend=False, template="plotly_white",
+        hovermode="x unified", margin=dict(l=55, r=20, t=10, b=30), bargap=0.15,
+    )
+    return fig
+
+
+def breadth_headline(b: pd.DataFrame) -> str:
+    if b.empty:
+        return ("Chưa đủ dữ liệu: cần ít nhất "
+                f"{HIGH_LOW_LOOKBACK + 1} phiên lịch sử mỗi mã để xét đỉnh/đáy 52 tuần.")
+    last = b.iloc[-1]
+    return (
+        f'Phiên {html.escape(str(last["trading_date"]))}: '
+        f'<span class="tag in">{int(last["highs"])} mã lập đỉnh</span> '
+        f'<span class="tag out">{int(last["lows"])} mã lập đáy</span> '
+        f'<span class="muted">trên {int(last["eligible"])} mã đủ 1 năm dữ liệu</span>'
+    )
 
 
 def add_zone_lines(fig, row, low, high):
@@ -151,13 +228,26 @@ def adx_trend_arrow(now, before):
     return ' <span class="arrow" title="ADX giảm so với 3 phiên trước: xu hướng yếu đi">↓</span>'
 
 
+def is_true(value) -> bool:
+    """True chỉ khi giá trị đúng là True (cột BOOLEAN có thể là None / NA)."""
+    return not pd.isna(value) and bool(value)
+
+
+def high_low_tag(r) -> str:
+    if is_true(r["new_high_52w"]):
+        return '<span class="tag in">đỉnh 52T</span>'
+    if is_true(r["new_low_52w"]):
+        return '<span class="tag out">đáy 52T</span>'
+    return ""
+
+
 def summary_rows(latest: pd.DataFrame) -> str:
     rows = []
     for _, r in latest.iterrows():
         t = html.escape(r["ticker"])
         rows.append(
             f'<tr data-ticker="{t}"><td class="tk">{t}</td><td>{r["trading_date"]}</td>'
-            f'<td class="num">{fmt(r["close"], 2)}</td>'
+            f'<td class="num">{fmt(r["close"], 2)}</td><td>{high_low_tag(r)}</td>'
             f'<td class="num">{fmt(r["rsi_14"], 1)}</td><td><span class="tag {zone_class(r["rsi_zone"])}">{r["rsi_zone"] or "–"}</span></td>'
             f'<td class="num">{fmt(r["mfi_14"], 1)}</td><td><span class="tag {zone_class(r["mfi_zone"])}">{r["mfi_zone"] or "–"}</span></td>'
             f'<td class="num">{fmt(r["cmf_20"], 3)}</td><td><span class="tag {zone_class(r["cmf_signal"])}">{r["cmf_signal"] or "–"}</span></td>'
@@ -197,16 +287,27 @@ PAGE = """<!doctype html>
   select { font-size: 15px; padding: 6px 10px; border-radius: 8px; border: 1px solid #cbd5e1; }
   .note { color: #64748b; font-size: 12px; line-height: 1.5; }
   .arrow { color: #64748b; font-weight: 700; }
+  h2 { font-size: 15px; margin: 0 0 6px; }
+  .muted { color: #64748b; font-size: 12px; }
+  .headline { font-size: 14px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 4px; }
 </style>
 </head>
 <body>
 <main>
   <h1>Chỉ báo cổ phiếu</h1>
-  <div class="sub">Cập nhật lúc __UPDATED__ · dữ liệu 90 phiên gần nhất</div>
+  <div class="sub">Cập nhật lúc __UPDATED__ · biểu đồ __DISPLAY__ phiên gần nhất, chỉ báo tính trên toàn bộ lịch sử đã lưu</div>
+
+  <div class="card">
+    <h2>Độ rộng thị trường: số mã lập đỉnh / đáy 52 tuần</h2>
+    <div class="headline">__BREADTH_HEADLINE__</div>
+    <div id="breadth"></div>
+    <p class="note">Cột xanh: số mã có giá cao nhất phiên vượt đỉnh của 250 phiên trước đó; cột đỏ: số mã thủng đáy 250 phiên.
+      Rê chuột vào cột để xem tên mã. VN-Index tăng mà số mã lập đỉnh giảm dần là dấu hiệu đà tăng đang hẹp lại.</p>
+  </div>
 
   <div class="card scroll">
     <table>
-      <thead><tr><th>Mã</th><th>Phiên</th><th>Giá</th><th>RSI</th><th></th><th>MFI</th><th></th><th>CMF</th><th></th><th>ADX</th><th></th></tr></thead>
+      <thead><tr><th>Mã</th><th>Phiên</th><th>Giá</th><th>52T</th><th>RSI</th><th></th><th>MFI</th><th></th><th>CMF</th><th></th><th>ADX</th><th></th></tr></thead>
       <tbody>__ROWS__</tbody>
     </table>
   </div>
@@ -214,9 +315,7 @@ PAGE = """<!doctype html>
   <div class="card">
     <div class="bar"><label for="ticker"><b>Mã:</b></label><select id="ticker">__OPTIONS__</select></div>
     <div id="chart"></div>
-    <p class="note">RSI nét đứt mờ: khoảng 45 phiên đầu của cửa sổ 90 phiên, RSI chưa ổn định nên chưa đáng tin.
-      ADX làm mượt hai lần nên cần nhiều dữ liệu hơn: chỉ khoảng 20 phiên gần nhất (nét liền) là đáng tin;
-      giá trị ADX ở bảng tổng quan là phiên mới nhất nên dùng được.
+    <p class="note">Nét đứt mờ: mã mới niêm yết chưa đủ lịch sử nên RSI/ADX ở đoạn đó chưa ổn định, chưa đáng tin.
       ADX chỉ đo độ mạnh của xu hướng (≥ 25: có xu hướng, &lt; 20: đi ngang, dải xám ở giữa là vùng chuyển tiếp);
       hướng xem +DI (xanh) so với −DI (đỏ). Mũi tên ↑/↓: ADX so với 3 phiên trước.
       Các chỉ báo là công cụ theo dõi, không phải tín hiệu mua bán.</p>
@@ -224,6 +323,8 @@ PAGE = """<!doctype html>
 </main>
 <script>
 const FIGS = __FIGS__;
+const BREADTH = __BREADTH__;
+if (BREADTH) Plotly.newPlot("breadth", BREADTH.data, BREADTH.layout, {responsive: true, displaylogo: false});
 const select = document.getElementById("ticker");
 function show(ticker) {
   if (!FIGS[ticker]) ticker = Object.keys(FIGS)[0];
@@ -249,22 +350,35 @@ show(decodeURIComponent(location.hash.slice(1)));
 
 
 def build_page(data: pd.DataFrame) -> str:
-    data = data.copy()
+    data = data.sort_values(["ticker", "trading_date"]).reset_index(drop=True)
     data["trading_date"] = pd.to_datetime(data["trading_date"]).dt.strftime("%Y-%m-%d")
+    data["pos"] = data.groupby("ticker").cumcount()  # phiên thứ mấy trong lịch sử của mã
+    data["adx_3_ago"] = data.groupby("ticker")["adx_14"].shift(3)
+
     figs = {}
     for ticker, df in data.groupby("ticker"):
-        figs[ticker] = json.loads(build_figure(df.reset_index(drop=True)).to_json())
-    data["adx_3_ago"] = data.groupby("ticker")["adx_14"].shift(3)
+        shown = df.tail(DISPLAY_SESSIONS).reset_index(drop=True)
+        figs[ticker] = json.loads(build_figure(shown).to_json())
     latest = data.groupby("ticker").tail(1).sort_values("ticker")
+
+    breadth = breadth_table(data)
+    breadth_fig = json.loads(build_breadth_figure(breadth).to_json()) if not breadth.empty else None
+
     options = "".join(f'<option value="{html.escape(t)}">{html.escape(t)}</option>' for t in figs)
     updated = datetime.now(ZoneInfo(VN_TZ)).strftime("%H:%M ngày %d/%m/%Y")
-    figs_json = json.dumps(figs, ensure_ascii=False).replace("</", "<\\/")
+
+    def to_js(obj):
+        return json.dumps(obj, ensure_ascii=False).replace("</", "<\\/")
+
     return (
         PAGE.replace("__PLOTLY_SRC__", f"https://cdn.plot.ly/plotly-{get_plotlyjs_version()}.min.js")
         .replace("__UPDATED__", updated)
+        .replace("__DISPLAY__", str(DISPLAY_SESSIONS))
+        .replace("__BREADTH_HEADLINE__", breadth_headline(breadth))
         .replace("__ROWS__", summary_rows(latest))
         .replace("__OPTIONS__", options)
-        .replace("__FIGS__", figs_json)
+        .replace("__BREADTH__", to_js(breadth_fig))
+        .replace("__FIGS__", to_js(figs))
     )
 
 

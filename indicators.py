@@ -1,4 +1,5 @@
-"""Tính RSI, MFI, CMF, ADX/+DI/-DI cho mọi mã trong bảng daily_prices và lưu vào bảng indicators.
+"""Tính RSI, MFI, CMF, ADX/+DI/-DI và cờ lập đỉnh/đáy 52 tuần cho mọi mã trong bảng
+daily_prices, lưu vào bảng indicators.
 
 Chạy sau scraper.py. Mỗi lần chạy tính lại toàn bộ từ dữ liệu mới nhất,
 nên chạy bao nhiêu lần cũng cho cùng kết quả (không nhân đôi dòng).
@@ -30,6 +31,8 @@ ADX_PERIOD = 14
 ADX_TREND = 25           # ADX >= mức này: có xu hướng rõ (hướng do +DI / -DI quyết định)
 ADX_NO_TREND = 20        # ADX < mức này: thị trường đi ngang
 
+HIGH_LOW_LOOKBACK = 250  # 52 tuần ~ 250 phiên: so đỉnh/đáy phiên hôm nay với 250 phiên trước đó
+
 SOURCE_TABLE = "daily_prices"
 TABLE = "indicators"
 VN_TZ = "Asia/Ho_Chi_Minh"
@@ -50,19 +53,23 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     mfi_zone      TEXT,
     cmf_signal    TEXT,
     adx_signal    TEXT,
+    new_high_52w  BOOLEAN,
+    new_low_52w   BOOLEAN,
     snapshot_date DATE,
     computed_at   TIMESTAMP,
     PRIMARY KEY (ticker, trading_date)
 )
 """
 
-# Bảng indicators tạo từ phiên bản trước chưa có cột ADX: thêm vào nếu thiếu
+# Bảng indicators tạo từ phiên bản trước chưa có các cột mới: thêm vào nếu thiếu
 # (chạy nhiều lần không sao, cột đã có thì Postgres bỏ qua).
 MIGRATIONS = [
     f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS adx_14 DOUBLE PRECISION",
     f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS plus_di_14 DOUBLE PRECISION",
     f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS minus_di_14 DOUBLE PRECISION",
     f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS adx_signal TEXT",
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS new_high_52w BOOLEAN",
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS new_low_52w BOOLEAN",
 ]
 
 # Chỉ lấy snapshot mới nhất của mỗi mã: snapshot đó đã chứa đủ ~1 năm giá,
@@ -189,6 +196,20 @@ def cmf_label(value):
     return "trung tính"
 
 
+def new_high_low(df: pd.DataFrame, lookback: int = HIGH_LOW_LOOKBACK):
+    """Cờ lập đỉnh / đáy `lookback` phiên (mặc định 52 tuần) của từng phiên.
+
+    Lập đỉnh: giá cao nhất hôm nay VƯỢT giá cao nhất của `lookback` phiên trước đó.
+    Lập đáy:  giá thấp nhất hôm nay THỦNG giá thấp nhất của `lookback` phiên trước đó.
+    Phiên chưa có đủ `lookback` phiên lịch sử (vd: mã mới niêm yết) -> để trống (NULL),
+    không tính vào thống kê độ rộng thị trường."""
+    prior_high = df["high"].rolling(lookback, min_periods=lookback).max().shift(1)
+    prior_low = df["low"].rolling(lookback, min_periods=lookback).min().shift(1)
+    new_high = (df["high"] > prior_high).astype("boolean").mask(prior_high.isna())
+    new_low = (df["low"] < prior_low).astype("boolean").mask(prior_low.isna())
+    return new_high, new_low
+
+
 def adx_label(adx_value, plus_di, minus_di):
     if pd.isna(adx_value):
         return None
@@ -220,6 +241,7 @@ def compute(prices: pd.DataFrame) -> pd.DataFrame:
         df["adx_14"] = dmi["adx"]
         df["plus_di_14"] = dmi["plus_di"]
         df["minus_di_14"] = dmi["minus_di"]
+        df["new_high_52w"], df["new_low_52w"] = new_high_low(df)
         frames.append(df)
 
     out = pd.concat(frames, ignore_index=True)
@@ -237,7 +259,8 @@ def compute(prices: pd.DataFrame) -> pd.DataFrame:
     return out[
         ["ticker", "trading_date", "close", "volume", "rsi_14", "mfi_14", "cmf_20",
          "adx_14", "plus_di_14", "minus_di_14",
-         "rsi_zone", "mfi_zone", "cmf_signal", "adx_signal", "snapshot_date", "computed_at"]
+         "rsi_zone", "mfi_zone", "cmf_signal", "adx_signal", "new_high_52w", "new_low_52w",
+         "snapshot_date", "computed_at"]
     ]
 
 
@@ -284,6 +307,16 @@ def print_summary(result: pd.DataFrame):
             f"{r['cmf_20']:>8.3f}  {str(r['cmf_signal']):<14}"
             f"{r['adx_14']:>6.1f}  {r['adx_signal']}"
         )
+
+    last_day = result["trading_date"].max()
+    day = result[result["trading_date"] == last_day]
+    eligible = day["new_high_52w"].notna().sum()
+    print(
+        f"\nĐỘ RỘNG THỊ TRƯỜNG phiên {last_day}: "
+        f"{int(day['new_high_52w'].sum())} mã lập đỉnh 52 tuần, "
+        f"{int(day['new_low_52w'].sum())} mã lập đáy 52 tuần "
+        f"(trên {eligible} mã đủ 1 năm dữ liệu)"
+    )
 
 
 def main():
