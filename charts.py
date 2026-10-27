@@ -1,8 +1,8 @@
-"""Vẽ biểu đồ giá, RSI, MFI, CMF của từng mã từ bảng indicators.
+"""Vẽ biểu đồ giá, RSI, MFI, CMF, ADX của từng mã từ bảng indicators.
 
 Kết quả là một trang web duy nhất: site/index.html
 - Bảng tổng quan phiên gần nhất (bấm vào một mã để xem biểu đồ của mã đó)
-- Ô chọn mã và biểu đồ 4 tầng: giá đóng cửa, RSI, MFI, CMF
+- Ô chọn mã và biểu đồ 5 tầng: giá đóng cửa, RSI, MFI, CMF, ADX (+DI / -DI)
 
 Chạy sau indicators.py. Trên GitHub Actions, thư mục site/ được đăng lên GitHub Pages.
 """
@@ -21,6 +21,8 @@ from sqlalchemy import text
 
 # Dùng chung ngưỡng và cách kết nối với indicators.py để hai file luôn khớp nhau
 from indicators import (
+    ADX_NO_TREND,
+    ADX_TREND,
     CMF_THRESHOLD,
     MFI_OVERBOUGHT,
     MFI_OVERSOLD,
@@ -33,26 +35,36 @@ OUTPUT_DIR = "site"
 VN_TZ = "Asia/Ho_Chi_Minh"
 # Vì chỉ lưu 90 phiên, RSI ở khoảng 45 phiên đầu cửa sổ chưa ổn định -> vẽ nét đứt mờ
 RSI_RELIABLE_AFTER = 45
+# ADX làm mượt hai lần nên cần nhiều dữ liệu hơn hẳn: thử trên 300 chuỗi giá mô phỏng,
+# ADX tính từ 90 phiên chỉ khớp (sai lệch < 2 điểm, 95% trường hợp) với ADX tính từ
+# lịch sử dài kể từ khoảng phiên 70. +DI / -DI hội tụ nhanh hơn, tương đương RSI.
+ADX_RELIABLE_AFTER = 70
+DI_RELIABLE_AFTER = 45
 
 QUERY = """
-SELECT ticker, trading_date, close, rsi_14, mfi_14, cmf_20, rsi_zone, mfi_zone, cmf_signal
+SELECT ticker, trading_date, close, rsi_14, mfi_14, cmf_20,
+       adx_14, plus_di_14, minus_di_14,
+       rsi_zone, mfi_zone, cmf_signal, adx_signal
 FROM indicators
 ORDER BY ticker, trading_date
 """
 
-COLORS = {"price": "#2563eb", "rsi": "#7c3aed", "mfi": "#0891b2", "up": "#16a34a", "down": "#dc2626"}
+COLORS = {"price": "#2563eb", "rsi": "#7c3aed", "mfi": "#0891b2", "up": "#16a34a", "down": "#dc2626",
+          "adx": "#1e293b"}
 
 
 def build_figure(df: pd.DataFrame) -> go.Figure:
     x = df["trading_date"]
     fig = make_subplots(
-        rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.06,
-        row_heights=[0.37, 0.21, 0.21, 0.21],
+        rows=5, cols=1, shared_xaxes=True, vertical_spacing=0.05,
+        row_heights=[0.32, 0.17, 0.17, 0.17, 0.17],
         subplot_titles=(
             "Giá đóng cửa (nghìn đồng)",
             f"RSI 14 phiên (quá mua ≥ {RSI_OVERBOUGHT}, quá bán ≤ {RSI_OVERSOLD})",
             f"MFI 14 phiên (quá mua ≥ {MFI_OVERBOUGHT}, quá bán ≤ {MFI_OVERSOLD})",
             "CMF 20 phiên (dương = tiền vào, âm = tiền ra)",
+            f"ADX 14 phiên (≥ {ADX_TREND}: có xu hướng) · "
+            "<span style='color:#16a34a'>+DI</span>/<span style='color:#dc2626'>−DI</span>",
         ),
     )
 
@@ -61,13 +73,7 @@ def build_figure(df: pd.DataFrame) -> go.Figure:
                              line=dict(color=COLORS["price"], width=2)), row=1, col=1)
 
     # 2) RSI: phần đầu cửa sổ (chưa ổn định) vẽ nét đứt mờ, phần sau vẽ nét liền
-    split = min(RSI_RELIABLE_AFTER, len(df) - 1)
-    early, late = df.iloc[: split + 1], df.iloc[split:]
-    fig.add_trace(go.Scatter(x=early["trading_date"], y=early["rsi_14"], name="RSI (chưa ổn định)",
-                             mode="lines", opacity=0.45,
-                             line=dict(color=COLORS["rsi"], width=1.5, dash="dot")), row=2, col=1)
-    fig.add_trace(go.Scatter(x=late["trading_date"], y=late["rsi_14"], name="RSI", mode="lines",
-                             line=dict(color=COLORS["rsi"], width=2)), row=2, col=1)
+    add_warmup_line(fig, df, "rsi_14", "RSI", COLORS["rsi"], 2, RSI_RELIABLE_AFTER, row=2)
     add_zone_lines(fig, row=2, low=RSI_OVERSOLD, high=RSI_OVERBOUGHT)
 
     # 3) MFI
@@ -82,8 +88,17 @@ def build_figure(df: pd.DataFrame) -> go.Figure:
     for level in (CMF_THRESHOLD, -CMF_THRESHOLD):
         fig.add_hline(y=level, line_color="#9ca3af", line_width=1, line_dash="dot", row=4, col=1)
 
+    # 5) ADX: +DI xanh, -DI đỏ, ADX đậm nằm trên cùng; dải xám 20-25 là vùng chuyển tiếp
+    #    (vẽ dải sau khi có đường: Plotly bỏ qua đường ngang trên tầng chưa có dữ liệu)
+    add_warmup_line(fig, df, "plus_di_14", "+DI", COLORS["up"], 1.5, DI_RELIABLE_AFTER, row=5)
+    add_warmup_line(fig, df, "minus_di_14", "−DI", COLORS["down"], 1.5, DI_RELIABLE_AFTER, row=5)
+    add_warmup_line(fig, df, "adx_14", "ADX", COLORS["adx"], 2.5, ADX_RELIABLE_AFTER, row=5)
+    add_zone_lines(fig, row=5, low=ADX_NO_TREND, high=ADX_TREND)
+
     fig.update_yaxes(range=[0, 100], row=2, col=1)
     fig.update_yaxes(range=[0, 100], row=3, col=1)
+    dmi_max = df[["adx_14", "plus_di_14", "minus_di_14"]].max().max()
+    fig.update_yaxes(range=[0, max(50, (0 if pd.isna(dmi_max) else dmi_max) + 5)], row=5, col=1)
 
     # Ẩn khoảng trống cuối tuần và ngày nghỉ lễ để các phiên nằm liền nhau
     dates = pd.to_datetime(x)
@@ -92,12 +107,24 @@ def build_figure(df: pd.DataFrame) -> go.Figure:
     fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"]), dict(values=holidays)])
 
     fig.update_layout(
-        height=860, showlegend=False, template="plotly_white", hovermode="x unified",
+        height=1040, showlegend=False, template="plotly_white", hovermode="x unified",
         margin=dict(l=55, r=20, t=40, b=30), bargap=0.15,
     )
     for ann in fig.layout.annotations:  # tiêu đề từng tầng: canh trái, chữ nhỏ
         ann.update(x=0, xanchor="left", font=dict(size=13))
     return fig
+
+
+def add_warmup_line(fig, df, col, name, color, width, reliable_after, row):
+    """Vẽ một đường chỉ báo: `reliable_after` phiên đầu cửa sổ (chưa ổn định) nét đứt mờ,
+    phần sau nét liền."""
+    split = min(reliable_after, len(df) - 1)
+    early, late = df.iloc[: split + 1], df.iloc[split:]
+    fig.add_trace(go.Scatter(x=early["trading_date"], y=early[col], name=f"{name} (chưa ổn định)",
+                             mode="lines", opacity=0.45,
+                             line=dict(color=color, width=max(width - 0.5, 1), dash="dot")), row=row, col=1)
+    fig.add_trace(go.Scatter(x=late["trading_date"], y=late[col], name=name, mode="lines",
+                             line=dict(color=color, width=width)), row=row, col=1)
 
 
 def add_zone_lines(fig, row, low, high):
@@ -107,11 +134,21 @@ def add_zone_lines(fig, row, low, high):
 
 
 def zone_class(label):
-    return {"quá mua": "hot", "quá bán": "cold", "dòng tiền vào": "in", "dòng tiền ra": "out"}.get(label, "")
+    return {"quá mua": "hot", "quá bán": "cold", "dòng tiền vào": "in", "dòng tiền ra": "out",
+            "xu hướng tăng": "in", "xu hướng giảm": "out"}.get(label, "")
 
 
 def fmt(value, digits):
     return "–" if pd.isna(value) else f"{value:.{digits}f}"
+
+
+def adx_trend_arrow(now, before):
+    """Mũi tên cho biết ADX đang mạnh lên hay yếu đi so với 3 phiên trước."""
+    if pd.isna(now) or pd.isna(before) or abs(now - before) < 0.5:
+        return ""
+    if now > before:
+        return ' <span class="arrow" title="ADX tăng so với 3 phiên trước: xu hướng mạnh lên">↑</span>'
+    return ' <span class="arrow" title="ADX giảm so với 3 phiên trước: xu hướng yếu đi">↓</span>'
 
 
 def summary_rows(latest: pd.DataFrame) -> str:
@@ -123,7 +160,9 @@ def summary_rows(latest: pd.DataFrame) -> str:
             f'<td class="num">{fmt(r["close"], 2)}</td>'
             f'<td class="num">{fmt(r["rsi_14"], 1)}</td><td><span class="tag {zone_class(r["rsi_zone"])}">{r["rsi_zone"] or "–"}</span></td>'
             f'<td class="num">{fmt(r["mfi_14"], 1)}</td><td><span class="tag {zone_class(r["mfi_zone"])}">{r["mfi_zone"] or "–"}</span></td>'
-            f'<td class="num">{fmt(r["cmf_20"], 3)}</td><td><span class="tag {zone_class(r["cmf_signal"])}">{r["cmf_signal"] or "–"}</span></td></tr>'
+            f'<td class="num">{fmt(r["cmf_20"], 3)}</td><td><span class="tag {zone_class(r["cmf_signal"])}">{r["cmf_signal"] or "–"}</span></td>'
+            f'<td class="num">{fmt(r["adx_14"], 1)}{adx_trend_arrow(r["adx_14"], r["adx_3_ago"])}</td>'
+            f'<td><span class="tag {zone_class(r["adx_signal"])}">{r["adx_signal"] or "–"}</span></td></tr>'
         )
     return "\n".join(rows)
 
@@ -155,6 +194,7 @@ PAGE = """<!doctype html>
   .bar { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
   select { font-size: 15px; padding: 6px 10px; border-radius: 8px; border: 1px solid #cbd5e1; }
   .note { color: #64748b; font-size: 12px; line-height: 1.5; }
+  .arrow { color: #64748b; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -164,7 +204,7 @@ PAGE = """<!doctype html>
 
   <div class="card scroll">
     <table>
-      <thead><tr><th>Mã</th><th>Phiên</th><th>Giá</th><th>RSI</th><th></th><th>MFI</th><th></th><th>CMF</th><th></th></tr></thead>
+      <thead><tr><th>Mã</th><th>Phiên</th><th>Giá</th><th>RSI</th><th></th><th>MFI</th><th></th><th>CMF</th><th></th><th>ADX</th><th></th></tr></thead>
       <tbody>__ROWS__</tbody>
     </table>
   </div>
@@ -173,6 +213,10 @@ PAGE = """<!doctype html>
     <div class="bar"><label for="ticker"><b>Mã:</b></label><select id="ticker">__OPTIONS__</select></div>
     <div id="chart"></div>
     <p class="note">RSI nét đứt mờ: khoảng 45 phiên đầu của cửa sổ 90 phiên, RSI chưa ổn định nên chưa đáng tin.
+      ADX làm mượt hai lần nên cần nhiều dữ liệu hơn: chỉ khoảng 20 phiên gần nhất (nét liền) là đáng tin;
+      giá trị ADX ở bảng tổng quan là phiên mới nhất nên dùng được.
+      ADX chỉ đo độ mạnh của xu hướng (≥ 25: có xu hướng, &lt; 20: đi ngang, dải xám ở giữa là vùng chuyển tiếp);
+      hướng xem +DI (xanh) so với −DI (đỏ). Mũi tên ↑/↓: ADX so với 3 phiên trước.
       Các chỉ báo là công cụ theo dõi, không phải tín hiệu mua bán.</p>
   </div>
 </main>
@@ -203,6 +247,7 @@ def build_page(data: pd.DataFrame) -> str:
     figs = {}
     for ticker, df in data.groupby("ticker"):
         figs[ticker] = json.loads(build_figure(df.reset_index(drop=True)).to_json())
+    data["adx_3_ago"] = data.groupby("ticker")["adx_14"].shift(3)
     latest = data.groupby("ticker").tail(1).sort_values("ticker")
     options = "".join(f'<option value="{html.escape(t)}">{html.escape(t)}</option>' for t in figs)
     updated = datetime.now(ZoneInfo(VN_TZ)).strftime("%H:%M ngày %d/%m/%Y")
