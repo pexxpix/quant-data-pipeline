@@ -9,7 +9,22 @@ import requests
 from sqlalchemy import create_engine, inspect, text
 
 TABLE = "daily_prices"
-WATCH_LIST = ["HPG", "POW", "PC1", "PLX","HDB", "TCH", "EIB", "TCX", "VIX", "GMD", "MSN" ]
+# Top 100 cổ phiếu Việt Nam theo https://stag.vn/stocks (lấy ngày 27/10/2026, giữ đúng thứ tự trên trang)
+TOP_100 = [
+    "VIC", "VCB", "VHM", "TCB", "CTG", "BID", "VGI", "GAS", "VPB", "MCH",
+    "HPG", "MBB", "ACV", "GVR", "STB", "VNM", "LPB", "MWG", "HDB", "ACB",
+    "MSN", "FPT", "DMX", "TCX", "VJC", "MVN", "MSR", "VCK", "KSF", "HVN",
+    "VRE", "SAB", "VEA", "BVH", "SSI", "SHB", "MSB", "VIB", "PLX", "SSB",
+    "VPX", "BCM", "FOX", "NVB", "THD", "TPB", "POW", "KSV", "EIB", "OCB",
+    "ABB", "HCM", "GEL", "FRT", "PGV", "KBC", "REE", "LPS", "NVL", "GMD",
+    "SSH", "DNH", "GEX", "VGC", "VND", "VIX", "DCM", "HAG", "QNS", "SBT",
+    "KDH", "PVS", "VCI", "SJS", "CC1", "IDP", "VNZ", "PVI", "CRV", "MBS",
+    "PHP", "VBB", "DPM", "VSF", "KDC", "LGC", "OIL", "HUT", "VEF", "DGC",
+    "VCR", "BAB", "F88", "PDR", "VHC", "DHG", "BMP", "DXG", "NLG", "TAL",
+]
+# Mã theo dõi riêng (ngoài top 100). Các mã cũ HPG, POW, PLX, HDB, EIB, TCX, VIX, GMD, MSN đã nằm trong TOP_100.
+EXTRA = ["PC1", "TCH"]
+WATCH_LIST = TOP_100 + [t for t in EXTRA if t not in TOP_100]
 KEEP_SESSIONS = 90  # chỉ giữ 90 phiên giao dịch gần nhất của mỗi mã
 # 90 phiên ~ 4-5 tháng lịch; xin dư 200 ngày lịch để chắc chắn đủ cả khi có nghỉ Tết/lễ,
 # sau đó cắt lại đúng 90 phiên.

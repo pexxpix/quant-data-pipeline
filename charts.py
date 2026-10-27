@@ -180,7 +180,9 @@ PAGE = """<!doctype html>
   h1 { font-size: 22px; margin: 0 0 4px; }
   .sub { color: #64748b; font-size: 13px; margin-bottom: 18px; }
   .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px; margin-bottom: 16px; }
-  .scroll { overflow-x: auto; }
+  /* ~100 mã: bảng cuộn trong khung riêng để biểu đồ không bị đẩy xuống quá xa */
+  .scroll { overflow: auto; max-height: 440px; position: relative; padding-top: 0; }
+  thead th { position: sticky; top: 0; z-index: 1; background: #fff; box-shadow: inset 0 -1px 0 #e2e8f0; }
   table { border-collapse: collapse; width: 100%; font-size: 14px; }
   th, td { padding: 7px 10px; border-bottom: 1px solid #f1f5f9; text-align: left; white-space: nowrap; }
   th { color: #64748b; font-weight: 600; font-size: 12px; }
@@ -229,6 +231,11 @@ function show(ticker) {
   Plotly.react("chart", fig.data, fig.layout, {responsive: true, displaylogo: false});
   select.value = ticker;
   document.querySelectorAll("tr[data-ticker]").forEach(r => r.classList.toggle("active", r.dataset.ticker === ticker));
+  // cuộn khung bảng (không cuộn cả trang) để dòng đang chọn luôn nhìn thấy
+  const row = document.querySelector('tr[data-ticker="' + ticker + '"]');
+  const box = row && row.closest(".scroll");
+  if (box && (row.offsetTop < box.scrollTop + 40 || row.offsetTop > box.scrollTop + box.clientHeight - 40))
+    box.scrollTop = row.offsetTop - box.clientHeight / 2;
   history.replaceState(null, "", "#" + ticker);
 }
 select.addEventListener("change", e => show(e.target.value));
