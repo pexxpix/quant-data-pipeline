@@ -23,7 +23,7 @@ TOP_100 = [
     "VCR", "BAB", "F88", "PDR", "VHC", "DHG", "BMP", "DXG", "NLG", "TAL",
 ]
 # Mã theo dõi riêng (ngoài top 100). Các mã cũ HPG, POW, PLX, HDB, EIB, TCX, VIX, GMD, MSN đã nằm trong TOP_100.
-EXTRA = ["PC1", "TCH"]
+EXTRA = ["PC1", "TCH", "VPL", "DCL", "VPI", "PET", "VTP", "CTR", "NAB", "VSC", "BSR", "GEE", "PVD", "DGW"]
 WATCH_LIST = TOP_100 + [t for t in EXTRA if t not in TOP_100]
 # 340 phiên = 250 phiên (52 tuần) để so đỉnh/đáy + 90 phiên hiển thị trên biểu đồ.
 # Nhờ có lịch sử dài, RSI/ADX trên cả 90 phiên hiển thị đều đã ổn định.
