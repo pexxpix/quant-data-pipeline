@@ -56,6 +56,49 @@ FROM indicators
 ORDER BY ticker, trading_date
 """
 
+# Bộ lọc "Top biến động + thanh khoản": chỉnh các con số ở đây
+SCREEN_SESSIONS = 5       # so giá hiện tại với giá đóng cửa N phiên trước
+SCREEN_BASE_SESSIONS = 10  # khối lượng nền: trung bình M phiên ngay trước N phiên đó
+SCREEN_VOL_MULT = 1.5     # KL trung bình N phiên gần nhất >= hệ số này x KL nền
+SCREEN_TOP = 20           # số mã hiển thị
+
+# Lấy từ daily_prices (giá gốc), cùng logic với truy vấn chạy tay trên Neon SQL Editor
+SCREEN_QUERY = """
+WITH p AS (
+    SELECT ticker, trading_date, close, volume,
+           ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) AS rn
+    FROM daily_prices
+),
+agg AS (
+    SELECT ticker,
+           MAX(trading_date) FILTER (WHERE rn = 1)       AS last_date,
+           MAX(close)        FILTER (WHERE rn = 1)       AS close_now,
+           MAX(close)        FILTER (WHERE rn = :n + 1)  AS close_before,
+           AVG(volume)       FILTER (WHERE rn <= :n)     AS vol_recent,
+           AVG(volume)       FILTER (WHERE rn >  :n)     AS vol_base,
+           COUNT(*)                                      AS n_rows
+    FROM p
+    WHERE rn <= :n + :base
+    GROUP BY ticker
+)
+SELECT ticker,
+       last_date,
+       close_before,
+       close_now,
+       100 * (close_now / close_before - 1)  AS pct,
+       vol_recent,
+       vol_base,
+       vol_recent / vol_base                 AS vol_ratio,
+       close_now * vol_recent / 1e6          AS value_bn
+FROM agg
+WHERE n_rows = :n + :base                -- chỉ xét mã có đủ dữ liệu
+  AND vol_base > 0
+  AND vol_recent >= :mult * vol_base     -- điều kiện thanh khoản
+  AND close_before > 0
+ORDER BY pct DESC                        -- tăng mạnh nhất lên đầu
+LIMIT :top
+"""
+
 COLORS = {"price": "#2563eb", "rsi": "#7c3aed", "mfi": "#0891b2", "up": "#16a34a", "down": "#dc2626",
           "adx": "#1e293b"}
 
@@ -289,6 +332,10 @@ PAGE = """<!doctype html>
   .arrow { color: #64748b; font-weight: 700; }
   h2 { font-size: 15px; margin: 0 0 6px; }
   .muted { color: #64748b; font-size: 12px; }
+  .hscroll { overflow-x: auto; }
+  th.r { text-align: right; }
+  .pos { color: #15803d; font-weight: 600; } .neg { color: #b91c1c; font-weight: 600; }
+  .empty { color: #64748b; font-size: 13px; padding: 10px; white-space: normal; }
   .headline { font-size: 14px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 4px; }
 </style>
 </head>
@@ -303,6 +350,20 @@ PAGE = """<!doctype html>
     <div id="breadth"></div>
     <p class="note">Cột xanh: số mã có giá cao nhất phiên vượt đỉnh của 250 phiên trước đó; cột đỏ: số mã thủng đáy 250 phiên.
       Rê chuột vào cột để xem tên mã. VN-Index tăng mà số mã lập đỉnh giảm dần là dấu hiệu đà tăng đang hẹp lại.</p>
+  </div>
+
+  <div class="card" id="screen">
+    <h2>Top biến động giá __SCREEN_N__ phiên kèm thanh khoản tăng</h2>
+    <div class="muted" style="margin-bottom:6px">Khối lượng trung bình __SCREEN_N__ phiên gần nhất ≥ __SCREEN_MULT__ lần
+      trung bình __SCREEN_BASE__ phiên trước đó · xếp theo % thay đổi giá, tăng mạnh nhất lên đầu · bấm vào mã để xem biểu đồ</div>
+    <div class="hscroll">
+    <table>
+      <thead><tr><th>Mã</th><th>Phiên</th><th class="r">Giá __SCREEN_N__ phiên trước</th><th class="r">Giá hiện tại</th>
+        <th class="r">% __SCREEN_N__ phiên</th><th class="r">KL TB __SCREEN_N__ phiên</th><th class="r">KL TB __SCREEN_BASE__ phiên trước</th>
+        <th class="r">Tỷ lệ KL</th><th class="r">GTGD TB (tỷ đồng)</th></tr></thead>
+      <tbody>__SCREEN_ROWS__</tbody>
+    </table>
+    </div>
   </div>
 
   <div class="card scroll">
@@ -332,8 +393,8 @@ function show(ticker) {
   Plotly.react("chart", fig.data, fig.layout, {responsive: true, displaylogo: false});
   select.value = ticker;
   document.querySelectorAll("tr[data-ticker]").forEach(r => r.classList.toggle("active", r.dataset.ticker === ticker));
-  // cuộn khung bảng (không cuộn cả trang) để dòng đang chọn luôn nhìn thấy
-  const row = document.querySelector('tr[data-ticker="' + ticker + '"]');
+  // cuộn khung bảng tổng quan (không cuộn cả trang) để dòng đang chọn luôn nhìn thấy
+  const row = document.querySelector('.scroll tr[data-ticker="' + ticker + '"]');
   const box = row && row.closest(".scroll");
   if (box && (row.offsetTop < box.scrollTop + 40 || row.offsetTop > box.scrollTop + box.clientHeight - 40))
     box.scrollTop = row.offsetTop - box.clientHeight / 2;
@@ -349,7 +410,26 @@ show(decodeURIComponent(location.hash.slice(1)));
 """
 
 
-def build_page(data: pd.DataFrame) -> str:
+def screen_rows(screen) -> str:
+    if screen is None or screen.empty:
+        return ('<tr><td colspan="9" class="empty">Hôm nay không có mã nào thỏa điều kiện '
+                '(thanh khoản chưa tăng đủ mạnh).</td></tr>')
+    rows = []
+    for _, r in screen.iterrows():
+        t = html.escape(str(r["ticker"]))
+        pct = r["pct"]
+        cls = "pos" if pct > 0 else "neg" if pct < 0 else ""
+        rows.append(
+            f'<tr data-ticker="{t}"><td class="tk">{t}</td><td>{r["last_date"]}</td>'
+            f'<td class="num">{fmt(r["close_before"], 2)}</td><td class="num">{fmt(r["close_now"], 2)}</td>'
+            f'<td class="num {cls}">{pct:+.2f}%</td>'
+            f'<td class="num">{r["vol_recent"]:,.0f}</td><td class="num">{r["vol_base"]:,.0f}</td>'
+            f'<td class="num">{fmt(r["vol_ratio"], 2)}×</td><td class="num">{fmt(r["value_bn"], 1)}</td></tr>'
+        )
+    return "\n".join(rows)
+
+
+def build_page(data: pd.DataFrame, screen: pd.DataFrame = None) -> str:
     data = data.sort_values(["ticker", "trading_date"]).reset_index(drop=True)
     data["trading_date"] = pd.to_datetime(data["trading_date"]).dt.strftime("%Y-%m-%d")
     data["pos"] = data.groupby("ticker").cumcount()  # phiên thứ mấy trong lịch sử của mã
@@ -375,6 +455,10 @@ def build_page(data: pd.DataFrame) -> str:
         .replace("__UPDATED__", updated)
         .replace("__DISPLAY__", str(DISPLAY_SESSIONS))
         .replace("__BREADTH_HEADLINE__", breadth_headline(breadth))
+        .replace("__SCREEN_ROWS__", screen_rows(screen))
+        .replace("__SCREEN_N__", str(SCREEN_SESSIONS))
+        .replace("__SCREEN_BASE__", str(SCREEN_BASE_SESSIONS))
+        .replace("__SCREEN_MULT__", f"{SCREEN_VOL_MULT:g}")
         .replace("__ROWS__", summary_rows(latest))
         .replace("__OPTIONS__", options)
         .replace("__BREADTH__", to_js(breadth_fig))
@@ -385,13 +469,19 @@ def build_page(data: pd.DataFrame) -> str:
 def run(engine):
     with engine.connect() as conn:
         data = pd.read_sql(text(QUERY), conn)
+        screen = pd.read_sql(text(SCREEN_QUERY), conn, params={
+            "n": SCREEN_SESSIONS, "base": SCREEN_BASE_SESSIONS,
+            "mult": SCREEN_VOL_MULT, "top": SCREEN_TOP,
+        })
     if data.empty:
         print("LỖI: bảng indicators chưa có dữ liệu. Hãy chạy indicators.py trước.")
         sys.exit(1)
+    print(f"Top biến động {SCREEN_SESSIONS} phiên kèm thanh khoản: {len(screen)} mã"
+          + (f" ({', '.join(screen['ticker'])})" if not screen.empty else ""))
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     path = os.path.join(OUTPUT_DIR, "index.html")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(build_page(data))
+        f.write(build_page(data, screen))
     print(f"Đã vẽ biểu đồ cho {data['ticker'].nunique()} mã -> {path}")
     return path
 
