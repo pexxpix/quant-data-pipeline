@@ -57,8 +57,8 @@ ORDER BY ticker, trading_date
 """
 
 # Bộ lọc "Top biến động + thanh khoản": chỉnh các con số ở đây
-SCREEN_SESSIONS = 5       # so giá hiện tại với giá đóng cửa N phiên trước
-SCREEN_BASE_SESSIONS = 10  # khối lượng nền: trung bình M phiên ngay trước N phiên đó
+SCREEN_SESSIONS = 3       # so giá hiện tại với giá đóng cửa N phiên trước + KL trung bình N phiên gần nhất
+SCREEN_BASE_SESSIONS = 5  # khối lượng nền: trung bình M phiên ngay trước N phiên đó (không chồng lấn)
 SCREEN_VOL_MULT = 1.5     # KL trung bình N phiên gần nhất >= hệ số này x KL nền
 SCREEN_TOP = 20           # số mã hiển thị
 
@@ -354,8 +354,9 @@ PAGE = """<!doctype html>
 
   <div class="card" id="screen">
     <h2>Top biến động giá __SCREEN_N__ phiên kèm thanh khoản tăng</h2>
-    <div class="muted" style="margin-bottom:6px">Khối lượng trung bình __SCREEN_N__ phiên gần nhất ≥ __SCREEN_MULT__ lần
-      trung bình __SCREEN_BASE__ phiên trước đó · xếp theo % thay đổi giá, tăng mạnh nhất lên đầu · bấm vào mã để xem biểu đồ</div>
+    <div class="muted" style="margin-bottom:6px">% giá: giá hiện tại so với giá đóng cửa __SCREEN_N__ phiên trước ·
+      khối lượng trung bình __SCREEN_N__ phiên gần nhất ≥ __SCREEN_MULT__ lần trung bình __SCREEN_BASE__ phiên trước đó ·
+      xếp theo % thay đổi giá, tăng mạnh nhất lên đầu · bấm vào mã để xem biểu đồ</div>
     <div class="hscroll">
     <table>
       <thead><tr><th>Mã</th><th>Phiên</th><th class="r">Giá __SCREEN_N__ phiên trước</th><th class="r">Giá hiện tại</th>
