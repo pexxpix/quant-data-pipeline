@@ -1,4 +1,4 @@
-"""Vẽ biểu đồ giá, RSI, MFI, CMF, ADX của từng mã và độ rộng thị trường từ bảng indicators.
+"""Vẽ biểu đồ giá (kèm MA50), RSI, MFI, CMF, ADX của từng mã và độ rộng thị trường từ bảng indicators.
 
 Kết quả là một trang web duy nhất: site/index.html
 - Độ rộng thị trường: số mã lập đỉnh / đáy 52 tuần mỗi phiên
@@ -27,6 +27,7 @@ from indicators import (
     ADX_TREND,
     CMF_THRESHOLD,
     HIGH_LOW_LOOKBACK,
+    MA_PERIOD,
     MFI_OVERBOUGHT,
     MFI_OVERSOLD,
     RSI_OVERBOUGHT,
@@ -49,7 +50,7 @@ DI_RELIABLE_AFTER = 45
 
 QUERY = """
 SELECT ticker, trading_date, close, rsi_14, mfi_14, cmf_20,
-       adx_14, plus_di_14, minus_di_14,
+       adx_14, plus_di_14, minus_di_14, ma_50, above_ma50,
        rsi_zone, mfi_zone, cmf_signal, adx_signal,
        new_high_52w, new_low_52w
 FROM indicators
@@ -100,7 +101,7 @@ LIMIT :top
 """
 
 COLORS = {"price": "#2563eb", "rsi": "#7c3aed", "mfi": "#0891b2", "up": "#16a34a", "down": "#dc2626",
-          "adx": "#1e293b"}
+          "adx": "#1e293b", "ma": "#d97706"}
 
 
 def build_figure(df: pd.DataFrame) -> go.Figure:
@@ -109,7 +110,7 @@ def build_figure(df: pd.DataFrame) -> go.Figure:
         rows=5, cols=1, shared_xaxes=True, vertical_spacing=0.05,
         row_heights=[0.32, 0.17, 0.17, 0.17, 0.17],
         subplot_titles=(
-            "Giá đóng cửa (nghìn đồng)",
+            f"Giá đóng cửa (nghìn đồng) · <span style='color:{COLORS['ma']}'>MA{MA_PERIOD}</span>",
             f"RSI 14 phiên (quá mua ≥ {RSI_OVERBOUGHT}, quá bán ≤ {RSI_OVERSOLD})",
             f"MFI 14 phiên (quá mua ≥ {MFI_OVERBOUGHT}, quá bán ≤ {MFI_OVERSOLD})",
             "CMF 20 phiên (dương = tiền vào, âm = tiền ra)",
@@ -118,7 +119,9 @@ def build_figure(df: pd.DataFrame) -> go.Figure:
         ),
     )
 
-    # 1) Giá
+    # 1) Giá + đường MA50 (cam)
+    fig.add_trace(go.Scatter(x=x, y=df["ma_50"], name=f"MA{MA_PERIOD}", mode="lines",
+                             line=dict(color=COLORS["ma"], width=1.8)), row=1, col=1)
     fig.add_trace(go.Scatter(x=x, y=df["close"], name="Giá", mode="lines",
                              line=dict(color=COLORS["price"], width=2)), row=1, col=1)
 
@@ -247,6 +250,31 @@ def breadth_headline(b: pd.DataFrame) -> str:
     )
 
 
+def ma_breadth_headline(data: pd.DataFrame) -> str:
+    """Số mã đóng cửa trên MA50 ở phiên mới nhất (chỉ xét mã có đủ dữ liệu tính MA50)."""
+    day = data[data["trading_date"] == data["trading_date"].max()]
+    eligible = day["above_ma50"].notna().sum()
+    if not eligible:
+        return ""
+    above = int(day["above_ma50"].fillna(False).astype(bool).sum())
+    return (f'<span class="tag">{above}/{eligible} mã ({100 * above / eligible:.0f}%) '
+            f'trên MA{MA_PERIOD}</span>')
+
+
+def ma_cells(r) -> str:
+    """Hai ô của bảng tổng quan: khoảng cách giá so với MA50 (%) và nhãn trên/dưới."""
+    ma, close = r["ma_50"], r["close"]
+    if pd.isna(ma) or pd.isna(close) or ma == 0:
+        return '<td class="num">–</td><td><span class="tag">–</span></td>'
+    gap = 100 * (close / ma - 1)
+    if is_true(r["above_ma50"]):
+        tag = '<span class="tag in">trên</span>'
+    else:
+        tag = '<span class="tag out">dưới</span>'
+    title = f'MA{MA_PERIOD} = {ma:.2f}'
+    return f'<td class="num" title="{title}">{gap:+.1f}%</td><td>{tag}</td>'
+
+
 def add_zone_lines(fig, row, low, high):
     fig.add_hrect(y0=low, y1=high, fillcolor="#e5e7eb", opacity=0.35, line_width=0, row=row, col=1)
     for level in (low, high):
@@ -291,6 +319,7 @@ def summary_rows(latest: pd.DataFrame) -> str:
         rows.append(
             f'<tr data-ticker="{t}"><td class="tk">{t}</td><td>{r["trading_date"]}</td>'
             f'<td class="num">{fmt(r["close"], 2)}</td><td>{high_low_tag(r)}</td>'
+            f'{ma_cells(r)}'
             f'<td class="num">{fmt(r["rsi_14"], 1)}</td><td><span class="tag {zone_class(r["rsi_zone"])}">{r["rsi_zone"] or "–"}</span></td>'
             f'<td class="num">{fmt(r["mfi_14"], 1)}</td><td><span class="tag {zone_class(r["mfi_zone"])}">{r["mfi_zone"] or "–"}</span></td>'
             f'<td class="num">{fmt(r["cmf_20"], 3)}</td><td><span class="tag {zone_class(r["cmf_signal"])}">{r["cmf_signal"] or "–"}</span></td>'
@@ -317,7 +346,7 @@ PAGE = """<!doctype html>
   .scroll { overflow: auto; max-height: 440px; position: relative; padding-top: 0; }
   thead th { position: sticky; top: 0; z-index: 1; background: #fff; box-shadow: inset 0 -1px 0 #e2e8f0; }
   table { border-collapse: collapse; width: 100%; font-size: 14px; }
-  th, td { padding: 7px 10px; border-bottom: 1px solid #f1f5f9; text-align: left; white-space: nowrap; }
+  th, td { padding: 7px 8px; border-bottom: 1px solid #f1f5f9; text-align: left; white-space: nowrap; }
   th { color: #64748b; font-weight: 600; font-size: 12px; }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
   tr[data-ticker] { cursor: pointer; }
@@ -345,8 +374,8 @@ PAGE = """<!doctype html>
   <div class="sub">Cập nhật lúc __UPDATED__ · biểu đồ __DISPLAY__ phiên gần nhất, chỉ báo tính trên toàn bộ lịch sử đã lưu</div>
 
   <div class="card">
-    <h2>Độ rộng thị trường: số mã lập đỉnh / đáy 52 tuần</h2>
-    <div class="headline">__BREADTH_HEADLINE__</div>
+    <h2>Độ rộng thị trường: số mã lập đỉnh / đáy 52 tuần · số mã trên MA__MA__</h2>
+    <div class="headline">__BREADTH_HEADLINE__ __MA_BREADTH__</div>
     <div id="breadth"></div>
     <p class="note">Cột xanh: số mã có giá cao nhất phiên vượt đỉnh của 250 phiên trước đó; cột đỏ: số mã thủng đáy 250 phiên.
       Rê chuột vào cột để xem tên mã. VN-Index tăng mà số mã lập đỉnh giảm dần là dấu hiệu đà tăng đang hẹp lại.</p>
@@ -369,7 +398,7 @@ PAGE = """<!doctype html>
 
   <div class="card scroll">
     <table>
-      <thead><tr><th>Mã</th><th>Phiên</th><th>Giá</th><th>52T</th><th>RSI</th><th></th><th>MFI</th><th></th><th>CMF</th><th></th><th>ADX</th><th></th></tr></thead>
+      <thead><tr><th>Mã</th><th>Phiên</th><th>Giá</th><th>52T</th><th title="Giá đóng cửa so với MA__MA__">vs MA__MA__</th><th></th><th>RSI</th><th></th><th>MFI</th><th></th><th>CMF</th><th></th><th>ADX</th><th></th></tr></thead>
       <tbody>__ROWS__</tbody>
     </table>
   </div>
@@ -377,7 +406,9 @@ PAGE = """<!doctype html>
   <div class="card">
     <div class="bar"><label for="ticker"><b>Mã:</b></label><select id="ticker">__OPTIONS__</select></div>
     <div id="chart"></div>
-    <p class="note">Nét đứt mờ: mã mới niêm yết chưa đủ lịch sử nên RSI/ADX ở đoạn đó chưa ổn định, chưa đáng tin.
+    <p class="note">Đường cam: MA__MA__ (trung bình giá đóng cửa __MA__ phiên). Giá nằm trên MA__MA__ thường được xem là xu hướng
+      trung hạn đang tăng; cột "vs MA__MA__" ở bảng tổng quan là khoảng cách giá so với đường này.
+      Nét đứt mờ: mã mới niêm yết chưa đủ lịch sử nên RSI/ADX ở đoạn đó chưa ổn định, chưa đáng tin.
       ADX chỉ đo độ mạnh của xu hướng (≥ 25: có xu hướng, &lt; 20: đi ngang, dải xám ở giữa là vùng chuyển tiếp);
       hướng xem +DI (xanh) so với −DI (đỏ). Mũi tên ↑/↓: ADX so với 3 phiên trước.
       Các chỉ báo là công cụ theo dõi, không phải tín hiệu mua bán.</p>
@@ -456,6 +487,8 @@ def build_page(data: pd.DataFrame, screen: pd.DataFrame = None) -> str:
         .replace("__UPDATED__", updated)
         .replace("__DISPLAY__", str(DISPLAY_SESSIONS))
         .replace("__BREADTH_HEADLINE__", breadth_headline(breadth))
+        .replace("__MA_BREADTH__", ma_breadth_headline(data))
+        .replace("__MA__", str(MA_PERIOD))
         .replace("__SCREEN_ROWS__", screen_rows(screen))
         .replace("__SCREEN_N__", str(SCREEN_SESSIONS))
         .replace("__SCREEN_BASE__", str(SCREEN_BASE_SESSIONS))

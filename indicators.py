@@ -1,4 +1,4 @@
-"""Tính RSI, MFI, CMF, ADX/+DI/-DI và cờ lập đỉnh/đáy 52 tuần cho mọi mã trong bảng
+"""Tính RSI, MFI, CMF, ADX/+DI/-DI, MA50 và cờ lập đỉnh/đáy 52 tuần cho mọi mã trong bảng
 daily_prices, lưu vào bảng indicators.
 
 Chạy sau scraper.py. Mỗi lần chạy tính lại toàn bộ từ dữ liệu mới nhất,
@@ -33,6 +33,8 @@ ADX_NO_TREND = 20        # ADX < mức này: thị trường đi ngang
 
 HIGH_LOW_LOOKBACK = 250  # 52 tuần ~ 250 phiên: so đỉnh/đáy phiên hôm nay với 250 phiên trước đó
 
+MA_PERIOD = 50           # đường trung bình giản đơn (SMA) của giá đóng cửa
+
 SOURCE_TABLE = "daily_prices"
 TABLE = "indicators"
 VN_TZ = "Asia/Ho_Chi_Minh"
@@ -49,6 +51,8 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     adx_14        DOUBLE PRECISION,
     plus_di_14    DOUBLE PRECISION,
     minus_di_14   DOUBLE PRECISION,
+    ma_50         DOUBLE PRECISION,
+    above_ma50    BOOLEAN,
     rsi_zone      TEXT,
     mfi_zone      TEXT,
     cmf_signal    TEXT,
@@ -70,6 +74,8 @@ MIGRATIONS = [
     f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS adx_signal TEXT",
     f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS new_high_52w BOOLEAN",
     f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS new_low_52w BOOLEAN",
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS ma_50 DOUBLE PRECISION",
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS above_ma50 BOOLEAN",
 ]
 
 # Chỉ lấy snapshot mới nhất của mỗi mã: snapshot đó đã chứa đủ ~1 năm giá,
@@ -210,6 +216,16 @@ def new_high_low(df: pd.DataFrame, lookback: int = HIGH_LOW_LOOKBACK):
     return new_high, new_low
 
 
+def moving_average(close: pd.Series, period: int = MA_PERIOD):
+    """MA giản đơn: trung bình cộng giá đóng cửa `period` phiên gần nhất (tính cả phiên hôm nay).
+    Trả về (ma, above): above = True khi giá đóng cửa hôm đó NẰM TRÊN MA.
+    Mã chưa đủ `period` phiên -> để trống (NULL)."""
+    ma = close.rolling(period, min_periods=period).mean()
+    # làm tròn trước khi so: giá bằng đúng MA (sai số số thực ~1e-15) luôn tính là "không trên MA"
+    above = (close.round(6) > ma.round(6)).astype("boolean").mask(ma.isna())
+    return ma, above
+
+
 def adx_label(adx_value, plus_di, minus_di):
     if pd.isna(adx_value):
         return None
@@ -242,6 +258,7 @@ def compute(prices: pd.DataFrame) -> pd.DataFrame:
         df["plus_di_14"] = dmi["plus_di"]
         df["minus_di_14"] = dmi["minus_di"]
         df["new_high_52w"], df["new_low_52w"] = new_high_low(df)
+        df["ma_50"], df["above_ma50"] = moving_average(df["close"])
         frames.append(df)
 
     out = pd.concat(frames, ignore_index=True)
@@ -256,9 +273,10 @@ def compute(prices: pd.DataFrame) -> pd.DataFrame:
     for col in ["rsi_14", "mfi_14", "adx_14", "plus_di_14", "minus_di_14"]:
         out[col] = out[col].round(2)
     out["cmf_20"] = out["cmf_20"].round(4)
+    out["ma_50"] = out["ma_50"].round(4)  # cờ above_ma50 đã tính trên giá trị chưa làm tròn
     return out[
         ["ticker", "trading_date", "close", "volume", "rsi_14", "mfi_14", "cmf_20",
-         "adx_14", "plus_di_14", "minus_di_14",
+         "adx_14", "plus_di_14", "minus_di_14", "ma_50", "above_ma50",
          "rsi_zone", "mfi_zone", "cmf_signal", "adx_signal", "new_high_52w", "new_low_52w",
          "snapshot_date", "computed_at"]
     ]
@@ -317,6 +335,10 @@ def print_summary(result: pd.DataFrame):
         f"{int(day['new_low_52w'].sum())} mã lập đáy 52 tuần "
         f"(trên {eligible} mã đủ 1 năm dữ liệu)"
     )
+    with_ma = day["above_ma50"].notna().sum()
+    above = int(day["above_ma50"].sum())
+    if with_ma:
+        print(f"{above}/{with_ma} mã ({100 * above / with_ma:.0f}%) đóng cửa trên MA{MA_PERIOD}")
 
 
 def main():
