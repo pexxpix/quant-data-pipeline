@@ -100,6 +100,36 @@ ORDER BY pct DESC                        -- tăng mạnh nhất lên đầu
 LIMIT :top
 """
 
+# Bộ lọc "Tăng giá liên tiếp": mã có giá đóng cửa tăng ít nhất STREAK_MIN phiên liền, tính đến phiên mới nhất
+STREAK_MIN = 3
+
+STREAK_QUERY = """
+WITH p AS (
+    SELECT ticker, trading_date, close, volume,
+           close > LAG(close) OVER (PARTITION BY ticker ORDER BY trading_date) AS tang,
+           ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC)  AS rn
+    FROM daily_prices
+),
+streak AS (
+    -- chuỗi tăng tính ngược từ phiên mới nhất, dừng ở phiên đầu tiên không tăng
+    SELECT ticker, MIN(rn) FILTER (WHERE tang IS NOT TRUE) - 1 AS so_phien_tang
+    FROM p
+    GROUP BY ticker
+)
+SELECT s.ticker,
+       now_.trading_date                      AS last_date,
+       s.so_phien_tang                        AS streak,
+       start_.close                           AS close_start,
+       now_.close                             AS close_now,
+       100 * (now_.close / start_.close - 1)  AS pct,
+       now_.close * now_.volume / 1e6         AS value_bn
+FROM streak s
+JOIN p now_   ON now_.ticker   = s.ticker AND now_.rn   = 1
+JOIN p start_ ON start_.ticker = s.ticker AND start_.rn = s.so_phien_tang + 1
+WHERE s.so_phien_tang >= :min_streak
+ORDER BY s.so_phien_tang DESC, pct DESC
+"""
+
 COLORS = {"price": "#2563eb", "rsi": "#7c3aed", "mfi": "#0891b2", "up": "#16a34a", "down": "#dc2626",
           "adx": "#1e293b", "ma": "#d97706"}
 
@@ -467,6 +497,19 @@ PAGE = """<!doctype html>
     </div>
   </div>
 
+  <div class="card" id="streak">
+    <h2>Tăng giá liên tiếp từ __STREAK_MIN__ phiên trở lên</h2>
+    <div class="muted" style="margin-bottom:6px">Giá đóng cửa tăng so với phiên trước liên tục đến phiên mới nhất
+      (phiên đứng giá làm chuỗi dừng lại) · xếp theo số phiên tăng, rồi theo % cả chuỗi · bấm vào mã để xem biểu đồ</div>
+    <div class="hscroll">
+    <table>
+      <thead><tr><th>Mã</th><th>Phiên</th><th class="r">Số phiên tăng</th><th class="r">Giá trước chuỗi tăng</th>
+        <th class="r">Giá hiện tại</th><th class="r">% cả chuỗi</th><th class="r">GTGD hôm nay (tỷ đồng)</th></tr></thead>
+      <tbody>__STREAK_ROWS__</tbody>
+    </table>
+    </div>
+  </div>
+
   <div class="card scroll">
     <table>
       <thead><tr><th>Mã</th><th>Phiên</th><th>Giá</th><th>52T</th><th title="Giá đóng cửa so với MA__MA__">vs MA__MA__</th><th></th><th>RSI</th><th></th><th>MFI</th><th></th><th>CMF</th><th></th><th>ADX</th><th></th></tr></thead>
@@ -534,7 +577,23 @@ def screen_rows(screen) -> str:
     return "\n".join(rows)
 
 
-def build_page(data: pd.DataFrame, screen: pd.DataFrame = None) -> str:
+def streak_rows(streak) -> str:
+    if streak is None or streak.empty:
+        return (f'<tr><td colspan="7" class="empty">Hôm nay không có mã nào tăng giá '
+                f'{STREAK_MIN} phiên liên tiếp trở lên.</td></tr>')
+    rows = []
+    for _, r in streak.iterrows():
+        t = html.escape(str(r["ticker"]))
+        rows.append(
+            f'<tr data-ticker="{t}"><td class="tk">{t}</td><td>{r["last_date"]}</td>'
+            f'<td class="num"><b>{int(r["streak"])}</b></td>'
+            f'<td class="num">{fmt(r["close_start"], 2)}</td><td class="num">{fmt(r["close_now"], 2)}</td>'
+            f'<td class="num pos">{r["pct"]:+.2f}%</td><td class="num">{fmt(r["value_bn"], 1)}</td></tr>'
+        )
+    return "\n".join(rows)
+
+
+def build_page(data: pd.DataFrame, screen: pd.DataFrame = None, streak: pd.DataFrame = None) -> str:
     data = data.sort_values(["ticker", "trading_date"]).reset_index(drop=True)
     data["trading_date"] = pd.to_datetime(data["trading_date"]).dt.strftime("%Y-%m-%d")
     data["pos"] = data.groupby("ticker").cumcount()  # phiên thứ mấy trong lịch sử của mã
@@ -565,6 +624,8 @@ def build_page(data: pd.DataFrame, screen: pd.DataFrame = None) -> str:
         .replace("__MA_BREADTH__", ma_breadth_headline(data))
         .replace("__MA__", str(MA_PERIOD))
         .replace("__SCREEN_ROWS__", screen_rows(screen))
+        .replace("__STREAK_ROWS__", streak_rows(streak))
+        .replace("__STREAK_MIN__", str(STREAK_MIN))
         .replace("__SCREEN_N__", str(SCREEN_SESSIONS))
         .replace("__SCREEN_BASE__", str(SCREEN_BASE_SESSIONS))
         .replace("__SCREEN_MULT__", f"{SCREEN_VOL_MULT:g}")
@@ -584,15 +645,18 @@ def run(engine):
             "n": SCREEN_SESSIONS, "base": SCREEN_BASE_SESSIONS,
             "mult": SCREEN_VOL_MULT, "top": SCREEN_TOP,
         })
+        streak = pd.read_sql(text(STREAK_QUERY), conn, params={"min_streak": STREAK_MIN})
     if data.empty:
         print("LỖI: bảng indicators chưa có dữ liệu. Hãy chạy indicators.py trước.")
         sys.exit(1)
     print(f"Top biến động {SCREEN_SESSIONS} phiên kèm thanh khoản: {len(screen)} mã"
           + (f" ({', '.join(screen['ticker'])})" if not screen.empty else ""))
+    print(f"Tăng giá liên tiếp >= {STREAK_MIN} phiên: {len(streak)} mã"
+          + (f" ({', '.join(streak['ticker'])})" if not streak.empty else ""))
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     path = os.path.join(OUTPUT_DIR, "index.html")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(build_page(data, screen))
+        f.write(build_page(data, screen, streak))
     print(f"Đã vẽ biểu đồ cho {data['ticker'].nunique()} mã -> {path}")
     return path
 
