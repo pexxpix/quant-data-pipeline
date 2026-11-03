@@ -237,6 +237,68 @@ def build_breadth_figure(b: pd.DataFrame) -> go.Figure:
     return fig
 
 
+def market_breadth_table(data: pd.DataFrame) -> pd.DataFrame:
+    """Độ rộng thị trường mỗi phiên (DISPLAY_SESSIONS phiên gần nhất): số mã tăng (adv),
+    giảm (dec), đứng giá (unch) so với giá đóng cửa phiên trước của chính mã đó."""
+    d = data[["ticker", "trading_date", "close"]].copy()
+    d["chg"] = d.groupby("ticker")["close"].diff()
+    d = d.dropna(subset=["chg"])
+    if d.empty:
+        return pd.DataFrame()
+    g = d.groupby("trading_date")["chg"]
+    out = pd.DataFrame({
+        "adv": g.apply(lambda c: int((c > 0).sum())),
+        "dec": g.apply(lambda c: int((c < 0).sum())),
+        "unch": g.apply(lambda c: int((c == 0).sum())),
+    })
+    return out.sort_index().tail(DISPLAY_SESSIONS).reset_index()
+
+
+def build_market_breadth_figure(m: pd.DataFrame) -> go.Figure:
+    """Mỗi phiên: cột xanh (hướng lên) = số mã tăng, cột đỏ (hướng xuống) = số mã giảm."""
+    x = m["trading_date"]
+    info = list(zip(m["adv"], m["dec"], m["unch"], m["adv"] + m["dec"] + m["unch"]))
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=x, y=m["adv"], name="Số mã tăng", marker_color=COLORS["up"], customdata=info,
+        hovertemplate="<b>%{customdata[0]} mã tăng</b> · %{customdata[1]} mã giảm · "
+                      "%{customdata[2]} đứng giá (trên %{customdata[3]} mã)<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=x, y=-m["dec"], name="Số mã giảm", marker_color=COLORS["down"], hoverinfo="skip",
+    ))
+    fig.add_hline(y=0, line_color="#6b7280", line_width=1)
+    dates = pd.to_datetime(x)
+    weekdays = pd.bdate_range(dates.min(), dates.max())
+    holidays = [d.strftime("%Y-%m-%d") for d in weekdays.difference(dates)]
+    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"]), dict(values=holidays)])
+    peak = int(max(m["adv"].max(), m["dec"].max(), 5))
+    step = 10 if peak <= 60 else 20 if peak <= 120 else 50
+    ticks = list(range(-((peak // step) + 1) * step, ((peak // step) + 1) * step + 1, step))
+    fig.update_yaxes(range=[-peak * 1.1, peak * 1.1], tickvals=ticks, ticktext=[str(abs(t)) for t in ticks],
+                     title=dict(text="giảm  ←  số mã  →  tăng", font=dict(size=11)))
+    fig.update_layout(height=320, barmode="relative", showlegend=False, template="plotly_white",
+                      hovermode="x unified", margin=dict(l=55, r=20, t=10, b=30), bargap=0.15)
+    return fig
+
+
+def market_breadth_headline(m: pd.DataFrame) -> str:
+    if m.empty:
+        return ""
+    last = m.iloc[-1]
+    total = int(last["adv"] + last["dec"] + last["unch"])
+    avg_adv = m["adv"].mean()
+    avg_dec = m["dec"].mean()
+    return (
+        f'Phiên {html.escape(str(last["trading_date"]))}: '
+        f'<span class="tag in">{int(last["adv"])} mã tăng</span> '
+        f'<span class="tag out">{int(last["dec"])} mã giảm</span> '
+        f'<span class="tag">{int(last["unch"])} đứng giá</span> '
+        f'<span class="muted">trên {total} mã · trung bình {len(m)} phiên: '
+        f'{avg_adv:.0f} tăng / {avg_dec:.0f} giảm mỗi phiên</span>'
+    )
+
+
 def breadth_headline(b: pd.DataFrame) -> str:
     if b.empty:
         return ("Chưa đủ dữ liệu: cần ít nhất "
@@ -374,6 +436,15 @@ PAGE = """<!doctype html>
   <div class="sub">Cập nhật lúc __UPDATED__ · biểu đồ __DISPLAY__ phiên gần nhất, chỉ báo tính trên toàn bộ lịch sử đã lưu</div>
 
   <div class="card">
+    <h2>Độ rộng thị trường __DISPLAY__ phiên</h2>
+    <div class="headline">__MKT_HEADLINE__</div>
+    <div id="mktbreadth"></div>
+    <p class="note">Cột xanh: số mã tăng giá so với phiên trước; cột đỏ (hướng xuống): số mã giảm giá.
+      Rê chuột vào cột để xem cả số mã đứng giá. Nhiều phiên liền cột xanh áp đảo: đà tăng lan rộng;
+      chỉ số tăng mà số mã giảm vẫn nhiều hơn số mã tăng: đà tăng chỉ tập trung ở ít mã.</p>
+  </div>
+
+  <div class="card">
     <h2>Độ rộng thị trường: số mã lập đỉnh / đáy 52 tuần · số mã trên MA__MA__</h2>
     <div class="headline">__BREADTH_HEADLINE__ __MA_BREADTH__</div>
     <div id="breadth"></div>
@@ -417,6 +488,8 @@ PAGE = """<!doctype html>
 <script>
 const FIGS = __FIGS__;
 const BREADTH = __BREADTH__;
+const MKT = __MKT__;
+if (MKT) Plotly.newPlot("mktbreadth", MKT.data, MKT.layout, {responsive: true, displaylogo: false});
 if (BREADTH) Plotly.newPlot("breadth", BREADTH.data, BREADTH.layout, {responsive: true, displaylogo: false});
 const select = document.getElementById("ticker");
 function show(ticker) {
@@ -474,6 +547,8 @@ def build_page(data: pd.DataFrame, screen: pd.DataFrame = None) -> str:
     latest = data.groupby("ticker").tail(1).sort_values("ticker")
 
     breadth = breadth_table(data)
+    mkt = market_breadth_table(data)
+    mkt_fig = json.loads(build_market_breadth_figure(mkt).to_json()) if not mkt.empty else None
     breadth_fig = json.loads(build_breadth_figure(breadth).to_json()) if not breadth.empty else None
 
     options = "".join(f'<option value="{html.escape(t)}">{html.escape(t)}</option>' for t in figs)
@@ -495,6 +570,8 @@ def build_page(data: pd.DataFrame, screen: pd.DataFrame = None) -> str:
         .replace("__SCREEN_MULT__", f"{SCREEN_VOL_MULT:g}")
         .replace("__ROWS__", summary_rows(latest))
         .replace("__OPTIONS__", options)
+        .replace("__MKT_HEADLINE__", market_breadth_headline(mkt))
+        .replace("__MKT__", to_js(mkt_fig))
         .replace("__BREADTH__", to_js(breadth_fig))
         .replace("__FIGS__", to_js(figs))
     )
