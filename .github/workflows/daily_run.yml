@@ -39,7 +39,7 @@ jobs:
         DATABASE_URL: ${{ secrets.DATABASE_URL }}
       run: python scraper.py
 
-    - name: Tính chỉ báo RSI, MFI, CMF
+    - name: Tính chỉ báo (RSI, MFI, CMF, ADX, MA50, đỉnh/đáy 52 tuần)
       # Vẫn chạy khi bước cào lỗi một vài mã, để các mã còn lại có chỉ báo mới
       if: ${{ !cancelled() }}
       env:
@@ -58,8 +58,13 @@ jobs:
       uses: actions/upload-pages-artifact@v4
       with:
         path: site
+        # Mỗi lần chạy lại (Re-run) đặt tên artifact riêng, tránh lỗi
+        # "Multiple artifacts named github-pages" ở bước đăng trang
+        name: github-pages-${{ github.run_attempt }}
 
     - name: Đăng lên GitHub Pages
       id: deployment
       if: ${{ !cancelled() && steps.charts.outcome == 'success' }}
       uses: actions/deploy-pages@v4
+      with:
+        artifact_name: github-pages-${{ github.run_attempt }}
