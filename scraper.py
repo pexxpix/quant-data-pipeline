@@ -12,15 +12,15 @@ TABLE = "daily_prices"
 # Top 100 cổ phiếu Việt Nam theo https://stag.vn/stocks (lấy ngày 27/10/2026, giữ đúng thứ tự trên trang)
 TOP_100 = [
     "VIC", "VCB", "VHM", "TCB", "CTG", "BID", "VGI", "GAS", "VPB", "MCH",
-    "HPG", "MBB", "ACV", "GVR", "STB", "VNM", "LPB", "MWG", "HDB", "ACB",
-    "MSN", "FPT", "DMX", "TCX", "VJC", "MVN", "MSR", "VCK", "KSF", "HVN",
-    "VRE", "SAB", "VEA", "BVH", "SSI", "SHB", "MSB", "VIB", "PLX", "SSB",
-    "VPX", "BCM", "FOX", "NVB", "THD", "TPB", "POW", "KSV", "EIB", "OCB",
-    "ABB", "HCM", "GEL", "FRT", "PGV", "KBC", "REE", "LPS", "NVL", "GMD",
-    "SSH", "DNH", "GEX", "VGC", "VND", "VIX", "DCM", "HAG", "QNS", "SBT",
-    "KDH", "PVS", "VCI", "SJS", "CC1", "IDP", "VNZ", "PVI", "CRV", "MBS",
-    "PHP", "VBB", "DPM", "VSF", "KDC", "LGC", "OIL", "HUT", "VEF", "DGC",
-    "VCR", "BAB", "F88", "PDR", "VHC", "DHG", "BMP", "DXG", "NLG", "TAL",
+    "HPG", "MBB", "ACV", "GVR", "STB", "VNM", "LPB", "MWG", "HDB", "ACB","HHS"
+    "MSN", "FPT", "DMX", "TCX", "VJC", "MVN", "MSR", "VCK", "KSF", "HVN","HHV"
+    "VRE", "SAB", "VEA", "BVH", "SSI", "SHB", "MSB", "VIB", "PLX", "SSB","CSV",
+    "VPX", "BCM", "FOX", "NVB", "THD", "TPB", "POW", "KSV", "EIB", "OCB","PAN"
+    "HCM", "GEL", "FRT", "PGV", "KBC", "REE", "LPS", "NVL", "GMD","DRI","DBC",
+    "GEX", "VGC", "VND", "VIX", "DCM", "HAG", "QNS", "SBT","VHC","HSG", "CTS",
+    "KDH", "PVS", "VCI", "MBS","CII","PNJ","SHS", "NKG", "HDC", "VCG","DIG",
+    "PHP", "DPM", "KDC", "OIL", "HUT", "DGC","NTP", "HHP", "SZC", "DPR", "BSI",
+    "PDR", "VHC", "DHG", "BMP", "DXG", "NLG","KSB","VOS", "HAH", "TNG", "DDV"
 ]
 # Mã theo dõi riêng (ngoài top 100). Các mã cũ HPG, POW, PLX, HDB, EIB, TCX, VIX, GMD, MSN đã nằm trong TOP_100.
 EXTRA = ["PC1", "TCH", "VPL", "DCL", "VPI", "PET", "VTP", "CTR", "NAB", "VSC", "BSR", "GEE", "PVD", "DGW", "PVT", "PVP"]
