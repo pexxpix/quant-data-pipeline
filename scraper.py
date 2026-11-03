@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta
@@ -12,19 +13,20 @@ TABLE = "daily_prices"
 # Top 100 cổ phiếu Việt Nam theo https://stag.vn/stocks (lấy ngày 27/10/2026, giữ đúng thứ tự trên trang)
 TOP_100 = [
     "VIC", "VCB", "VHM", "TCB", "CTG", "BID", "VGI", "GAS", "VPB", "MCH",
-    "HPG", "MBB", "ACV", "GVR", "STB", "VNM", "LPB", "MWG", "HDB", "ACB","HHS"
-    "MSN", "FPT", "DMX", "TCX", "VJC", "MVN", "MSR", "VCK", "KSF", "HVN","HHV"
+    "HPG", "MBB", "ACV", "GVR", "STB", "VNM", "LPB", "MWG", "HDB", "ACB", "HHS",
+    "MSN", "FPT", "DMX", "TCX", "VJC", "MVN", "MSR", "VCK", "KSF", "HVN", "HHV",
     "VRE", "SAB", "VEA", "BVH", "SSI", "SHB", "MSB", "VIB", "PLX", "SSB","CSV",
-    "VPX", "BCM", "FOX", "NVB", "THD", "TPB", "POW", "KSV", "EIB", "OCB","PAN"
+    "VPX", "BCM", "FOX", "NVB", "THD", "TPB", "POW", "KSV", "EIB", "OCB", "PAN",
     "HCM", "GEL", "FRT", "PGV", "KBC", "REE", "LPS", "NVL", "GMD","DRI","DBC",
     "GEX", "VGC", "VND", "VIX", "DCM", "HAG", "QNS", "SBT","VHC","HSG", "CTS",
     "KDH", "PVS", "VCI", "MBS","CII","PNJ","SHS", "NKG", "HDC", "VCG","DIG",
     "PHP", "DPM", "KDC", "OIL", "HUT", "DGC","NTP", "HHP", "SZC", "DPR", "BSI",
-    "PDR", "VHC", "DHG", "BMP", "DXG", "NLG","KSB","VOS", "HAH", "TNG", "DDV"
+    "PDR", "DHG", "BMP", "DXG", "NLG","KSB","VOS", "HAH", "TNG", "DDV"
 ]
 # Mã theo dõi riêng (ngoài top 100). Các mã cũ HPG, POW, PLX, HDB, EIB, TCX, VIX, GMD, MSN đã nằm trong TOP_100.
 EXTRA = ["PC1", "TCH", "VPL", "DCL", "VPI", "PET", "VTP", "CTR", "NAB", "VSC", "BSR", "GEE", "PVD", "DGW", "PVT", "PVP"]
-WATCH_LIST = TOP_100 + [t for t in EXTRA if t not in TOP_100]
+# Gộp, bỏ mã trùng (giữ thứ tự xuất hiện đầu tiên)
+WATCH_LIST = list(dict.fromkeys(TOP_100 + EXTRA))
 # 340 phiên = 250 phiên (52 tuần) để so đỉnh/đáy + 90 phiên hiển thị trên biểu đồ.
 # Nhờ có lịch sử dài, RSI/ADX trên cả 90 phiên hiển thị đều đã ổn định.
 KEEP_SESSIONS = 340
@@ -283,7 +285,12 @@ def main():
         sys.exit(1)
 
     snapshot_date = datetime.now(ZoneInfo(VN_TZ)).date()  # ngày lấy dữ liệu
-    print(f"Giữ {KEEP_SESSIONS} phiên gần nhất cho mỗi mã: {', '.join(WATCH_LIST)}")
+    print(f"Giữ {KEEP_SESSIONS} phiên gần nhất cho mỗi mã ({len(WATCH_LIST)} mã): {', '.join(WATCH_LIST)}")
+    # Mã cổ phiếu VN có 3 ký tự. Mã dài hơn thường do quên dấu phẩy trong danh sách:
+    # Python tự nối "HHS" "MSN" thành "HHSMSN".
+    odd = [t for t in WATCH_LIST if not re.fullmatch(r"[A-Z0-9]{3}", t)]
+    if odd:
+        print(f"CẢNH BÁO: mã không hợp lệ (kiểm tra dấu phẩy trong TOP_100 / EXTRA): {', '.join(odd)}")
 
     frames, failed = [], []
     for ticker in WATCH_LIST:
@@ -298,7 +305,8 @@ def main():
         print("LỖI NGHIÊM TRỌNG: không lấy được dữ liệu cho bất kỳ mã nào.")
         sys.exit(1)
 
-    all_data = pd.concat(frames, ignore_index=True)
+    # phòng trường hợp một mã bị lấy hai lần: mỗi (mã, phiên) chỉ giữ một dòng
+    all_data = pd.concat(frames, ignore_index=True).drop_duplicates(["ticker", "trading_date"], keep="last")
     print("Đang kết nối Database...")
     try:
         engine = make_engine(database_url)
