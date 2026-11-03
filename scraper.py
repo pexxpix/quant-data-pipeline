@@ -19,9 +19,9 @@ TOP_100 = [
     "VPX", "BCM", "FOX", "NVB", "THD", "TPB", "POW", "KSV", "EIB", "OCB", "PAN",
     "HCM", "GEL", "FRT", "PGV", "KBC", "REE", "LPS", "NVL", "GMD","DRI","DBC",
     "GEX", "VGC", "VND", "VIX", "DCM", "HAG", "QNS", "SBT","VHC","HSG", "CTS",
-    "KDH", "PVS", "VCI", "MBS","CII","PNJ","SHS", "NKG", "HDC", "VCG","DIG",
+    "KDH", "PVS", "VCI", "MBS","CII","PNJ","SHS", "NKG", "HDC", "VCG","DIG", "TVN",
     "PHP", "DPM", "KDC", "OIL", "HUT", "DGC","NTP", "HHP", "SZC", "DPR", "BSI",
-    "PDR", "DHG", "BMP", "DXG", "NLG","KSB","VOS", "HAH", "TNG", "DDV"
+    "PDR", "DHG", "BMP", "DXG", "NLG","KSB","VOS", "HAH", "TNG", "DDV", "CTD", "VGT"
 ]
 # Mã theo dõi riêng (ngoài top 100). Các mã cũ HPG, POW, PLX, HDB, EIB, TCX, VIX, GMD, MSN đã nằm trong TOP_100.
 EXTRA = ["PC1", "TCH", "VPL", "DCL", "VPI", "PET", "VTP", "CTR", "NAB", "VSC", "BSR", "GEE", "PVD", "DGW", "PVT", "PVP"]
