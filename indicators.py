@@ -34,6 +34,8 @@ ADX_NO_TREND = 20        # ADX < mức này: thị trường đi ngang
 HIGH_LOW_LOOKBACK = 250  # 52 tuần ~ 250 phiên: so đỉnh/đáy phiên hôm nay với 250 phiên trước đó
 
 MA_PERIOD = 50           # đường trung bình giản đơn (SMA) của giá đóng cửa
+MA_FAST = 10             # MA ngắn
+MA_SLOW = 20             # MA dài: theo dõi giao cắt giữa MA10 và MA20
 
 SOURCE_TABLE = "daily_prices"
 TABLE = "indicators"
@@ -53,6 +55,9 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     minus_di_14   DOUBLE PRECISION,
     ma_50         DOUBLE PRECISION,
     above_ma50    BOOLEAN,
+    ma_10         DOUBLE PRECISION,
+    ma_20         DOUBLE PRECISION,
+    ma_cross      TEXT,
     rsi_zone      TEXT,
     mfi_zone      TEXT,
     cmf_signal    TEXT,
@@ -76,6 +81,9 @@ MIGRATIONS = [
     f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS new_low_52w BOOLEAN",
     f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS ma_50 DOUBLE PRECISION",
     f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS above_ma50 BOOLEAN",
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS ma_10 DOUBLE PRECISION",
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS ma_20 DOUBLE PRECISION",
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS ma_cross TEXT",
 ]
 
 # Chỉ lấy snapshot mới nhất của mỗi mã: snapshot đó đã chứa đủ ~1 năm giá,
@@ -226,6 +234,19 @@ def moving_average(close: pd.Series, period: int = MA_PERIOD):
     return ma, above
 
 
+def ma_cross(fast: pd.Series, slow: pd.Series) -> pd.Series:
+    """Giao cắt giữa MA ngắn (fast) và MA dài (slow) tại từng phiên:
+    'up'   = MA10 cắt LÊN MA20 (hôm qua MA10 <= MA20, hôm nay MA10 > MA20) -> tín hiệu tăng
+    'down' = MA10 cắt XUỐNG MA20, tức MA20 cắt lên MA10 (hôm qua MA10 >= MA20, hôm nay MA10 < MA20)
+    Phiên không có giao cắt -> None. Làm tròn trước khi so để tránh sai số số thực."""
+    diff = (fast.round(6) - slow.round(6))
+    prev = diff.shift(1)
+    out = pd.Series(None, index=fast.index, dtype="object")
+    out[(diff > 0) & (prev <= 0)] = "up"
+    out[(diff < 0) & (prev >= 0)] = "down"
+    return out
+
+
 def adx_label(adx_value, plus_di, minus_di):
     if pd.isna(adx_value):
         return None
@@ -259,6 +280,9 @@ def compute(prices: pd.DataFrame) -> pd.DataFrame:
         df["minus_di_14"] = dmi["minus_di"]
         df["new_high_52w"], df["new_low_52w"] = new_high_low(df)
         df["ma_50"], df["above_ma50"] = moving_average(df["close"])
+        df["ma_10"], _ = moving_average(df["close"], MA_FAST)
+        df["ma_20"], _ = moving_average(df["close"], MA_SLOW)
+        df["ma_cross"] = ma_cross(df["ma_10"], df["ma_20"])
         frames.append(df)
 
     out = pd.concat(frames, ignore_index=True)
@@ -273,10 +297,12 @@ def compute(prices: pd.DataFrame) -> pd.DataFrame:
     for col in ["rsi_14", "mfi_14", "adx_14", "plus_di_14", "minus_di_14"]:
         out[col] = out[col].round(2)
     out["cmf_20"] = out["cmf_20"].round(4)
-    out["ma_50"] = out["ma_50"].round(4)  # cờ above_ma50 đã tính trên giá trị chưa làm tròn
+    for col in ["ma_50", "ma_10", "ma_20"]:
+        out[col] = out[col].round(4)  # cờ above_ma50 đã tính trên giá trị chưa làm tròn
     return out[
         ["ticker", "trading_date", "close", "volume", "rsi_14", "mfi_14", "cmf_20",
          "adx_14", "plus_di_14", "minus_di_14", "ma_50", "above_ma50",
+         "ma_10", "ma_20", "ma_cross",
          "rsi_zone", "mfi_zone", "cmf_signal", "adx_signal", "new_high_52w", "new_low_52w",
          "snapshot_date", "computed_at"]
     ]
@@ -339,6 +365,10 @@ def print_summary(result: pd.DataFrame):
     above = int(day["above_ma50"].sum())
     if with_ma:
         print(f"{above}/{with_ma} mã ({100 * above / with_ma:.0f}%) đóng cửa trên MA{MA_PERIOD}")
+    ups = sorted(day.loc[day["ma_cross"] == "up", "ticker"])
+    downs = sorted(day.loc[day["ma_cross"] == "down", "ticker"])
+    print(f"MA{MA_FAST} cắt lên MA{MA_SLOW}: {', '.join(ups) or '–'} | "
+          f"MA{MA_SLOW} cắt lên MA{MA_FAST} (MA{MA_FAST} cắt xuống): {', '.join(downs) or '–'}")
 
 
 def main():

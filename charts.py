@@ -27,7 +27,9 @@ from indicators import (
     ADX_TREND,
     CMF_THRESHOLD,
     HIGH_LOW_LOOKBACK,
+    MA_FAST,
     MA_PERIOD,
+    MA_SLOW,
     MFI_OVERBOUGHT,
     MFI_OVERSOLD,
     RSI_OVERBOUGHT,
@@ -50,7 +52,7 @@ DI_RELIABLE_AFTER = 45
 
 QUERY = """
 SELECT ticker, trading_date, close, rsi_14, mfi_14, cmf_20,
-       adx_14, plus_di_14, minus_di_14, ma_50, above_ma50,
+       adx_14, plus_di_14, minus_di_14, ma_50, above_ma50, ma_10, ma_20, ma_cross,
        rsi_zone, mfi_zone, cmf_signal, adx_signal,
        new_high_52w, new_low_52w
 FROM indicators
@@ -131,7 +133,7 @@ ORDER BY s.so_phien_tang DESC, pct DESC
 """
 
 COLORS = {"price": "#2563eb", "rsi": "#7c3aed", "mfi": "#0891b2", "up": "#16a34a", "down": "#dc2626",
-          "adx": "#1e293b", "ma": "#d97706"}
+          "adx": "#1e293b", "ma": "#d97706", "ma_fast": "#db2777", "ma_slow": "#0d9488"}
 
 
 def build_figure(df: pd.DataFrame) -> go.Figure:
@@ -140,7 +142,10 @@ def build_figure(df: pd.DataFrame) -> go.Figure:
         rows=5, cols=1, shared_xaxes=True, vertical_spacing=0.05,
         row_heights=[0.32, 0.17, 0.17, 0.17, 0.17],
         subplot_titles=(
-            f"Giá đóng cửa (nghìn đồng) · <span style='color:{COLORS['ma']}'>MA{MA_PERIOD}</span>",
+            f"Giá đóng cửa (nghìn đồng) · <span style='color:{COLORS['ma_fast']}'>MA{MA_FAST}</span> "
+            f"<span style='color:{COLORS['ma_slow']}'>MA{MA_SLOW}</span> "
+            f"<span style='color:{COLORS['ma']}'>MA{MA_PERIOD}</span> · "
+            f"<span style='color:{COLORS['up']}'>▲</span> MA{MA_FAST} cắt lên MA{MA_SLOW}",
             f"RSI 14 phiên (quá mua ≥ {RSI_OVERBOUGHT}, quá bán ≤ {RSI_OVERSOLD})",
             f"MFI 14 phiên (quá mua ≥ {MFI_OVERBOUGHT}, quá bán ≤ {MFI_OVERSOLD})",
             "CMF 20 phiên (dương = tiền vào, âm = tiền ra)",
@@ -152,8 +157,18 @@ def build_figure(df: pd.DataFrame) -> go.Figure:
     # 1) Giá + đường MA50 (cam)
     fig.add_trace(go.Scatter(x=x, y=df["ma_50"], name=f"MA{MA_PERIOD}", mode="lines",
                              line=dict(color=COLORS["ma"], width=1.8)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=df["ma_20"], name=f"MA{MA_SLOW}", mode="lines",
+                             line=dict(color=COLORS["ma_slow"], width=1.4)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=df["ma_10"], name=f"MA{MA_FAST}", mode="lines",
+                             line=dict(color=COLORS["ma_fast"], width=1.4)), row=1, col=1)
     fig.add_trace(go.Scatter(x=x, y=df["close"], name="Giá", mode="lines",
                              line=dict(color=COLORS["price"], width=2)), row=1, col=1)
+    # đánh dấu các phiên MA10 cắt lên MA20 (tam giác xanh dưới đường MA20)
+    ups = df[df["ma_cross"] == "up"]
+    if not ups.empty:
+        fig.add_trace(go.Scatter(x=ups["trading_date"], y=ups["ma_20"], name=f"MA{MA_FAST} cắt lên MA{MA_SLOW}",
+                                 mode="markers", marker=dict(symbol="triangle-up", size=11, color=COLORS["up"],
+                                                             line=dict(color="#fff", width=1))), row=1, col=1)
 
     # 2) RSI: phần đầu cửa sổ (chưa ổn định) vẽ nét đứt mờ, phần sau vẽ nét liền
     add_warmup_line(fig, df, "rsi_14", "RSI", COLORS["rsi"], 2, RSI_RELIABLE_AFTER, row=2)
@@ -497,6 +512,19 @@ PAGE = """<!doctype html>
     </div>
   </div>
 
+  <div class="card" id="macross">
+    <h2>MA__MAF__ cắt lên MA__MAS__ trong phiên hôm nay</h2>
+    <div class="muted" style="margin-bottom:6px">Phiên trước MA__MAF__ ≤ MA__MAS__, phiên mới nhất MA__MAF__ &gt; MA__MAS__ ·
+      xếp theo khoảng cách MA__MAF__ so với MA__MAS__ · cột cuối: giá đang trên hay dưới MA__MA__ · bấm vào mã để xem biểu đồ</div>
+    <div class="hscroll">
+    <table>
+      <thead><tr><th>Mã</th><th>Phiên</th><th class="r">Giá</th><th class="r">MA__MAF__</th><th class="r">MA__MAS__</th>
+        <th class="r">MA__MAF__ vs MA__MAS__</th><th>Giá vs MA__MA__</th></tr></thead>
+      <tbody>__CROSS_ROWS__</tbody>
+    </table>
+    </div>
+  </div>
+
   <div class="card" id="streak">
     <h2>Tăng giá liên tiếp từ __STREAK_MIN__ phiên trở lên</h2>
     <div class="muted" style="margin-bottom:6px">Giá đóng cửa tăng so với phiên trước liên tục đến phiên mới nhất
@@ -577,6 +605,34 @@ def screen_rows(screen) -> str:
     return "\n".join(rows)
 
 
+def ma50_tag(r) -> str:
+    if pd.isna(r["ma_50"]):
+        return '<span class="tag">–</span>'
+    if is_true(r["above_ma50"]):
+        return f'<span class="tag in">trên MA{MA_PERIOD}</span>'
+    return f'<span class="tag out">dưới MA{MA_PERIOD}</span>'
+
+
+def cross_rows(data: pd.DataFrame) -> str:
+    """Các mã có MA10 cắt lên MA20 đúng ở phiên mới nhất của toàn bảng."""
+    last_day = data["trading_date"].max()
+    day = data[(data["trading_date"] == last_day) & (data["ma_cross"] == "up")].copy()
+    if day.empty:
+        return (f'<tr><td colspan="7" class="empty">Phiên {html.escape(str(last_day))} không có mã nào '
+                f'có MA{MA_FAST} cắt lên MA{MA_SLOW}.</td></tr>')
+    day["gap"] = 100 * (day["ma_10"] / day["ma_20"] - 1)
+    rows = []
+    for _, r in day.sort_values("gap", ascending=False).iterrows():
+        t = html.escape(str(r["ticker"]))
+        rows.append(
+            f'<tr data-ticker="{t}"><td class="tk">{t}</td><td>{r["trading_date"]}</td>'
+            f'<td class="num">{fmt(r["close"], 2)}</td><td class="num">{fmt(r["ma_10"], 2)}</td>'
+            f'<td class="num">{fmt(r["ma_20"], 2)}</td><td class="num">{r["gap"]:+.2f}%</td>'
+            f'<td>{ma50_tag(r)}</td></tr>'
+        )
+    return "\n".join(rows)
+
+
 def streak_rows(streak) -> str:
     if streak is None or streak.empty:
         return (f'<tr><td colspan="7" class="empty">Hôm nay không có mã nào tăng giá '
@@ -625,6 +681,9 @@ def build_page(data: pd.DataFrame, screen: pd.DataFrame = None, streak: pd.DataF
         .replace("__MA__", str(MA_PERIOD))
         .replace("__SCREEN_ROWS__", screen_rows(screen))
         .replace("__STREAK_ROWS__", streak_rows(streak))
+        .replace("__CROSS_ROWS__", cross_rows(data))
+        .replace("__MAF__", str(MA_FAST))
+        .replace("__MAS__", str(MA_SLOW))
         .replace("__STREAK_MIN__", str(STREAK_MIN))
         .replace("__SCREEN_N__", str(SCREEN_SESSIONS))
         .replace("__SCREEN_BASE__", str(SCREEN_BASE_SESSIONS))
